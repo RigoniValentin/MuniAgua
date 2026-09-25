@@ -1,6 +1,5 @@
 node_modules/
 dist/
-public/
 storage/
 storage/**
 !storage/.gitkeep

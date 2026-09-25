@@ -81,9 +81,9 @@ export function createApp(): Application {
   });
 
   // ====== Static / SPA ======
-  const publicDir = path.resolve(__dirname, '..', 'public');
+  const distFrontDir = path.resolve(__dirname, '..', 'distFront');
   app.use(
-    express.static(publicDir, {
+    express.static(distFrontDir, {
       index: false,
       fallthrough: true,
       maxAge: env.NODE_ENV === 'production' ? '1d' : 0,
@@ -92,7 +92,7 @@ export function createApp(): Application {
 
   // SPA fallback: serve index.html for any non-API route
   app.get(/^\/(?!api).*/, (_req, res, next) => {
-    const indexPath = path.join(publicDir, 'index.html');
+    const indexPath = path.join(distFrontDir, 'index.html');
     res.sendFile(indexPath, (err) => {
       if (err) {
         next();
