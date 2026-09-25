@@ -1,0 +1,2 @@
+﻿firstName;lastName;documentType;documentNumber;clientType;phone;email;address.street;address.number;address.floor;address.apartment;address.neighborhood;address.locality;address.postalCode;address.references;notes;active
+Roberto;Gómez;DNI;12345678;LOCAL;+5493584000001;-;Belgrano;250;-;-;-;Buchardo;-;-;-;TRUE
