@@ -685,6 +685,197 @@ describe('Repartidor — entregas', () => {
     const movements = await AccountMovement.find({ clientId: client._id }).lean();
     expect(movements).toHaveLength(0);
   });
+
+  it('direct-order con CASH → genera 1 CREDIT CASH_COLLECTION y NO DEBIT', async () => {
+    const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const client = await seedClient({ documentNumber: '777' });
+    const refill = await seedProduct({ basePriceMinor: 1_000_000 });
+    const container = await seedProduct({
+      basePriceMinor: 1_500_000,
+      productType: 'CONTAINER',
+    });
+    const driverToken = await loginAs('driver@buchardo.gob.ar');
+
+    const res = await request(app)
+      .post('/api/delivery/me/direct-order')
+      .set('Authorization', `Bearer ${driverToken}`)
+      .send({
+        clientId: client._id.toString(),
+        items: [
+          { productId: refill._id.toString(), quantity: 1 },
+          { productId: container._id.toString(), quantity: 1 },
+        ],
+        paymentMethod: 'CASH',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order.paymentMethod).toBe('CASH');
+    expect(res.body.data.order.totalFinalMinor).toBe(2_500_000);
+    expect(res.body.data.order.paidAt).toBeTruthy();
+    expect(res.body.data.order.assignedTo).toBe(driver._id.toString());
+
+    const movements = await AccountMovement.find({ clientId: client._id }).lean();
+    expect(movements).toHaveLength(1);
+    expect(movements[0].direction).toBe('CREDIT');
+    expect(movements[0].amountMinor).toBe(2_500_000);
+    expect(movements[0].movementType).toBe('CASH_COLLECTION');
+    expect(movements[0].sourceType).toBe('ORDER');
+    expect(movements[0].idempotencyKey).toBe(
+      `ORDER:${res.body.data.order.id}:CASH_COLLECTION`,
+    );
+  });
+
+  it('direct-order con CASH y total 0 (AYUDA_SOCIAL) → no genera movimiento', async () => {
+    await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const client = await seedClient({
+      clientType: 'AYUDA_SOCIAL',
+      documentNumber: '666',
+    });
+    await seedPricingRule({ clientType: 'AYUDA_SOCIAL', adjustmentValue: -100 });
+    const refill = await seedProduct({ basePriceMinor: 1_000_000 });
+    const driverToken = await loginAs('driver@buchardo.gob.ar');
+
+    const res = await request(app)
+      .post('/api/delivery/me/direct-order')
+      .set('Authorization', `Bearer ${driverToken}`)
+      .send({
+        clientId: client._id.toString(),
+        items: [{ productId: refill._id.toString(), quantity: 1 }],
+        paymentMethod: 'CASH',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.data.order.totalFinalMinor).toBe(0);
+    expect(res.body.data.order.paymentMethod).toBe('CASH');
+    const movements = await AccountMovement.find({ clientId: client._id }).lean();
+    expect(movements).toHaveLength(0);
+  });
+
+  it('deliver con CASH sobre pedido CITIZEN revierte el DEBIT y crea CASH_COLLECTION', async () => {
+    const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
+    const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const client = await seedClient({
+      userId: citizen._id,
+      documentNumber: '555',
+      zona: null,
+    });
+    const refill = await seedProduct({ basePriceMinor: 1_000_000 });
+
+    // Citizen creates the order (DEBIT lands on cta cte).
+    const citizenToken = await loginAs('vecino@buchardo.gob.ar');
+    const createRes = await request(app)
+      .post('/api/orders/me')
+      .set('Authorization', `Bearer ${citizenToken}`)
+      .send({ items: [{ productId: refill._id.toString(), quantity: 1 }] });
+    expect(createRes.status).toBe(201);
+    const orderId = createRes.body.data.order.id;
+
+    // Move the order through the lifecycle manually (zone unknown, so it
+    // starts as CONFIRMED). Force PENDING → ASSIGNED → OUT_FOR_DELIVERY.
+    await Order.updateOne(
+      { _id: orderId },
+      {
+        $set: {
+          status: 'OUT_FOR_DELIVERY',
+          assignedTo: driver._id,
+          assignedAt: new Date(),
+          startedDeliveryAt: new Date(),
+        },
+      },
+    );
+
+    const movementsBefore = await AccountMovement.find({ clientId: client._id })
+      .lean();
+    expect(movementsBefore).toHaveLength(1);
+    expect(movementsBefore[0].direction).toBe('DEBIT');
+    expect(movementsBefore[0].movementType).toBe('ORDER_CHARGE');
+
+    // Driver flips to CASH on delivery.
+    const driverToken = await loginAs('driver@buchardo.gob.ar');
+    const deliverRes = await request(app)
+      .post(`/api/delivery/me/orders/${orderId}/deliver`)
+      .set('Authorization', `Bearer ${driverToken}`)
+      .send({ paymentMethod: 'CASH' });
+    expect(deliverRes.status).toBe(200);
+    expect(deliverRes.body.data.order.status).toBe('DELIVERED');
+    expect(deliverRes.body.data.order.paymentMethod).toBe('CASH');
+    expect(deliverRes.body.data.order.paidAt).toBeTruthy();
+
+    // Ledger now: original DEBIT, its REVERSAL, and the CASH_COLLECTION CREDIT.
+    const movementsAfter = await AccountMovement.find({ clientId: client._id })
+      .sort({ occurredAt: 1 })
+      .lean();
+    expect(movementsAfter).toHaveLength(3);
+    expect(movementsAfter[0].movementType).toBe('ORDER_CHARGE');
+    expect(movementsAfter[0].direction).toBe('DEBIT');
+    expect(movementsAfter[1].movementType).toBe('REVERSAL');
+    expect(movementsAfter[1].direction).toBe('CREDIT');
+    expect(movementsAfter[2].movementType).toBe('CASH_COLLECTION');
+    expect(movementsAfter[2].direction).toBe('CREDIT');
+    expect(movementsAfter[2].amountMinor).toBe(1_000_000);
+
+    // Net balance is 0 (DEBIT 1.000.000 - REVERSAL 1.000.000 + CASH_COLLECTION 0 → wait).
+    // The REVERSAL auto-inverts direction: it was a DEBIT → its reversal is a CREDIT.
+    // Net balance: +1 (DEBIT) −1 (REVERSAL CREDIT) −1 (CASH_COLLECTION CREDIT) = −1.
+    // That mirrors the standalone CASH order: "saldo a favor" reflects un-reconciled cash.
+    const debits = movementsAfter
+      .filter((m) => m.direction === 'DEBIT')
+      .reduce((acc, m) => acc + m.amountMinor, 0);
+    const credits = movementsAfter
+      .filter((m) => m.direction === 'CREDIT')
+      .reduce((acc, m) => acc + m.amountMinor, 0);
+    expect(debits).toBe(1_000_000);
+    expect(credits).toBe(2_000_000);
+  });
+
+  it('deliver con CASH idempotente (segunda vez) no duplica CASH_COLLECTION', async () => {
+    const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
+    const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const client = await seedClient({
+      userId: citizen._id,
+      documentNumber: '444',
+      zona: null,
+    });
+    const refill = await seedProduct({ basePriceMinor: 1_000_000 });
+    const citizenToken = await loginAs('vecino@buchardo.gob.ar');
+
+    const createRes = await request(app)
+      .post('/api/orders/me')
+      .set('Authorization', `Bearer ${citizenToken}`)
+      .send({ items: [{ productId: refill._id.toString(), quantity: 1 }] });
+    const orderId = createRes.body.data.order.id;
+    // Move the order to OUT_FOR_DELIVERY (not DELIVERED yet).
+    await Order.updateOne(
+      { _id: orderId },
+      {
+        $set: {
+          status: 'OUT_FOR_DELIVERY',
+          assignedTo: driver._id,
+          assignedAt: new Date(),
+          startedDeliveryAt: new Date(),
+        },
+      },
+    );
+
+    // First CASH flip (OUT_FOR_DELIVERY → DELIVERED, with CASH ledger swap).
+    const driverToken = await loginAs('driver@buchardo.gob.ar');
+    await request(app)
+      .post(`/api/delivery/me/orders/${orderId}/deliver`)
+      .set('Authorization', `Bearer ${driverToken}`)
+      .send({ paymentMethod: 'CASH' });
+    const movementsAfterFirst = await AccountMovement.find({ clientId: client._id })
+      .lean();
+    expect(movementsAfterFirst).toHaveLength(3);
+
+    // Re-deliver with CASH — Order is already DELIVERED+CASH, markDelivered
+    // returns 409 (terminal state). Confirm we didn't add a movement.
+    const second = await request(app)
+      .post(`/api/delivery/me/orders/${orderId}/deliver`)
+      .set('Authorization', `Bearer ${driverToken}`)
+      .send({ paymentMethod: 'CASH' });
+    expect(second.status).toBe(409);
+    const movementsAfterSecond = await AccountMovement.find({ clientId: client._id })
+      .lean();
+    expect(movementsAfterSecond).toHaveLength(3);
+  });
 });
 
 // ---------------------------------------------------------------------------

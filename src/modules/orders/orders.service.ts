@@ -41,10 +41,14 @@ import {
 } from '../accounts/accounts.service.js';
 import {
   canTransition,
-  ORDER_STATUSES,
+  ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX,
+  ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX,
   ORDER_DELIVERY_CHARGE_IDEMPOTENCY_PREFIX,
   ORDER_DELIVERY_CHARGE_IDEMPOTENCY_SUFFIX,
+  ORDER_PAYMENT_METHODS,
+  ORDER_STATUSES,
   type OrderOrigin,
+  type OrderPaymentMethod,
   type OrderStatus,
 } from './orders.types.js';
 import type { ClientType } from '../clients/clients.types.js';
@@ -125,9 +129,20 @@ export interface OrderDto {
   assignedTo?: string | null;
   assignedToName?: string | null;
   assignedAt?: Date | null;
-
-  startedDeliveryAt?: Date | null;
+startedDeliveryAt?: Date | null;
   deliveredAt?: Date | null;
+
+  /**
+   * How the order was settled (or will be settled).
+   *   ACCOUNT -> DEBIT ORDER_CHARGE landed on the cta cte (or will).
+   *   CASH    -> repartidor collected cash on delivery (ledger carries a
+   *              single CREDIT CASH_COLLECTION instead of a DEBIT).
+   */
+  paymentMethod: OrderPaymentMethod;
+
+  /** Settlement timestamp (collected cash / deliveredAt). */
+  paidAt?: Date | null;
+
   cancelledAt?: Date | null;
   cancellationReason?: string | null;
 
@@ -229,6 +244,8 @@ export function toOrderDto(
     assignedAt: doc.assignedAt ?? null,
     startedDeliveryAt: doc.startedDeliveryAt ?? null,
     deliveredAt: doc.deliveredAt ?? null,
+    paymentMethod: doc.paymentMethod,
+    paidAt: doc.paidAt ?? null,
     cancelledAt: doc.cancelledAt ?? null,
     cancellationReason: doc.cancellationReason ?? null,
     createdAt: doc.createdAt,
@@ -283,6 +300,12 @@ export interface CreateOrderInput {
    * Optional pre-assignment — staff direct-order pre-assigns to the driver.
    */
   assignTo?: string | null;
+  /**
+   * How the client pays. Defaults to ACCOUNT (legacy behaviour). CASH
+   * skips the ORDER_CHARGE DEBIT and posts a single CASH_COLLECTION CREDIT
+   * instead. Ignored for $0 totals.
+   */
+  paymentMethod?: OrderPaymentMethod;
   session?: ClientSession;
 }
 
@@ -396,6 +419,10 @@ function idempotencyKeyForOrder(orderId: Types.ObjectId): string {
   return `${ORDER_DELIVERY_CHARGE_IDEMPOTENCY_PREFIX}:${orderId.toString()}:${ORDER_DELIVERY_CHARGE_IDEMPOTENCY_SUFFIX}`;
 }
 
+function idempotencyKeyForCashCollection(orderId: Types.ObjectId): string {
+  return `${ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX}:${orderId.toString()}:${ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX}`;
+}
+
 // ============================================================================
 // Create order (atomic with ledger)
 // ============================================================================
@@ -461,6 +488,16 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
     initialStatus = ORDER_STATUSES.CONFIRMED;
   }
 
+  const paymentMethod: OrderPaymentMethod =
+    input.paymentMethod ?? ORDER_PAYMENT_METHODS.ACCOUNT;
+  const isOutForDeliveryOnCreate =
+    initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY;
+  // For CASH orders created directly as OUT_FOR_DELIVERY we treat the order
+  // as already settled at creation time — the repartidor hands over goods
+  // and cash in the same visit, so paidAt = createdAt.
+  const isAlreadySettledAtCreate =
+    isOutForDeliveryOnCreate && paymentMethod === ORDER_PAYMENT_METHODS.CASH;
+
   // Run the Order + ledger write atomically. When MongoDB supports
   // transactions, both writes live inside a single session; otherwise
   // we run them sequentially with compensation (delete the Order if the
@@ -485,8 +522,9 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
               ? new Types.ObjectId(input.assignTo)
               : null,
             assignedAt: input.assignTo ? now : null,
-            startedDeliveryAt:
-              initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY ? now : null,
+            startedDeliveryAt: isOutForDeliveryOnCreate ? now : null,
+            paymentMethod,
+            paidAt: isAlreadySettledAtCreate ? now : null,
             createdBy: new Types.ObjectId(input.createdBy),
           },
         ],
@@ -494,23 +532,45 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
       );
       if (!created) throw new ValidationError('No se pudo crear el pedido');
 
-      // Post DEBIT only if there is something to charge. $0 orders (AYUDA_SOCIAL)
-      // skip the ledger entirely — Order remains valid, accountMovementId stays null.
+      // Ledger entries only for orders with a non-zero total. $0 orders
+      // (AYUDA_SOCIAL 100% off) skip the ledger entirely — Order remains
+      // valid, accountMovementId stays null.
       if (totalFinalMinor > 0) {
-        const movement = await postMovement({
-          clientId: client._id.toString(),
-          direction: 'DEBIT',
-          amountMinor: totalFinalMinor,
-          movementType: 'ORDER_CHARGE',
-          description: 'Pedido confirmado',
-          sourceType: 'ORDER',
-          sourceId: created._id.toString(),
-          idempotencyKey: idempotencyKeyForOrder(created._id),
-          createdBy: input.createdBy,
-          session,
-        });
-        created.accountMovementId = movement._id;
-        await created.save({ session });
+        if (paymentMethod === ORDER_PAYMENT_METHODS.CASH) {
+          // CASH: no DEBIT. A single CREDIT CASH_COLLECTION entry audits
+          // the cash the repartidor collected. Net balance becomes
+          // negative (saldo a favor) until the cash is reconciled by an
+          // admin (post-MVP cash-up flow).
+          const movement = await postMovement({
+            clientId: client._id.toString(),
+            direction: 'CREDIT',
+            amountMinor: totalFinalMinor,
+            movementType: 'CASH_COLLECTION',
+            description: 'Cobro en contado',
+            sourceType: 'ORDER',
+            sourceId: created._id.toString(),
+            idempotencyKey: idempotencyKeyForCashCollection(created._id),
+            createdBy: input.createdBy,
+            session,
+          });
+          created.accountMovementId = movement._id;
+          await created.save({ session });
+        } else {
+          const movement = await postMovement({
+            clientId: client._id.toString(),
+            direction: 'DEBIT',
+            amountMinor: totalFinalMinor,
+            movementType: 'ORDER_CHARGE',
+            description: 'Pedido confirmado',
+            sourceType: 'ORDER',
+            sourceId: created._id.toString(),
+            idempotencyKey: idempotencyKeyForOrder(created._id),
+            createdBy: input.createdBy,
+            session,
+          });
+          created.accountMovementId = movement._id;
+          await created.save({ session });
+        }
       }
       return created;
     },
@@ -530,25 +590,42 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
           ? new Types.ObjectId(input.assignTo)
           : null,
         assignedAt: input.assignTo ? now : null,
-        startedDeliveryAt:
-          initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY ? now : null,
+        startedDeliveryAt: isOutForDeliveryOnCreate ? now : null,
+        paymentMethod,
+        paidAt: isAlreadySettledAtCreate ? now : null,
         createdBy: new Types.ObjectId(input.createdBy),
       });
       try {
         if (totalFinalMinor > 0) {
-          const movement = await postMovement({
-            clientId: client._id.toString(),
-            direction: 'DEBIT',
-            amountMinor: totalFinalMinor,
-            movementType: 'ORDER_CHARGE',
-            description: 'Pedido confirmado',
-            sourceType: 'ORDER',
-            sourceId: created._id.toString(),
-            idempotencyKey: idempotencyKeyForOrder(created._id),
-            createdBy: input.createdBy,
-          });
-          created.accountMovementId = movement._id;
-          await created.save();
+          if (paymentMethod === ORDER_PAYMENT_METHODS.CASH) {
+            const movement = await postMovement({
+              clientId: client._id.toString(),
+              direction: 'CREDIT',
+              amountMinor: totalFinalMinor,
+              movementType: 'CASH_COLLECTION',
+              description: 'Cobro en contado',
+              sourceType: 'ORDER',
+              sourceId: created._id.toString(),
+              idempotencyKey: idempotencyKeyForCashCollection(created._id),
+              createdBy: input.createdBy,
+            });
+            created.accountMovementId = movement._id;
+            await created.save();
+          } else {
+            const movement = await postMovement({
+              clientId: client._id.toString(),
+              direction: 'DEBIT',
+              amountMinor: totalFinalMinor,
+              movementType: 'ORDER_CHARGE',
+              description: 'Pedido confirmado',
+              sourceType: 'ORDER',
+              sourceId: created._id.toString(),
+              idempotencyKey: idempotencyKeyForOrder(created._id),
+              createdBy: input.createdBy,
+            });
+            created.accountMovementId = movement._id;
+            await created.save();
+          }
         }
         return created;
       } catch (err) {
@@ -695,19 +772,39 @@ export async function startDelivery(
   return order;
 }
 
+export interface MarkDeliveredInput {
+  orderId: string;
+  driverUserId: string;
+  /**
+   * Payment method used to settle the order. When omitted, the existing
+   * `paymentMethod` on the Order is preserved. Switching from ACCOUNT to
+   * CASH at delivery time reverses the existing ORDER_CHARGE DEBIT and
+   * posts a CASH_COLLECTION CREDIT instead (net balance returns to 0).
+   */
+  paymentMethod?: OrderPaymentMethod;
+}
+
 export async function markDelivered(
-  orderId: string,
-  driverUserId: string,
+  orderIdOrInput: string | MarkDeliveredInput,
+  driverUserIdLegacy?: string,
 ): Promise<OrderDocument> {
-  if (!Types.ObjectId.isValid(orderId)) {
+  // Backwards-compatible signature: accept either the legacy
+  // (orderId, driverUserId) tuple or the new options object.
+  const input: MarkDeliveredInput =
+    typeof orderIdOrInput === 'string'
+      ? { orderId: orderIdOrInput, driverUserId: driverUserIdLegacy ?? '' }
+      : orderIdOrInput;
+
+  if (!Types.ObjectId.isValid(input.orderId)) {
     throw new ValidationError('Identificador de pedido inválido');
   }
-  if (!Types.ObjectId.isValid(driverUserId)) {
+  if (!Types.ObjectId.isValid(input.driverUserId)) {
     throw new ValidationError('Identificador de usuario inválido');
   }
-  const order = await Order.findById(orderId);
+
+  const order = await Order.findById(input.orderId);
   if (!order) throw new NotFoundError('Pedido no encontrado');
-  if (!order.assignedTo || order.assignedTo.toString() !== driverUserId) {
+  if (!order.assignedTo || order.assignedTo.toString() !== input.driverUserId) {
     throw new ForbiddenError('El pedido no está asignado a este repartidor');
   }
   if (!canTransition(order.status, ORDER_STATUSES.DELIVERED)) {
@@ -715,9 +812,122 @@ export async function markDelivered(
       `No se puede marcar como entregado un pedido en estado ${order.status}`,
     );
   }
-  order.status = ORDER_STATUSES.DELIVERED;
-  order.deliveredAt = new Date();
-  await order.save();
+
+  const now = new Date();
+  const requestedPaymentMethod =
+    input.paymentMethod ?? order.paymentMethod;
+  const isFlippingToCash =
+    requestedPaymentMethod === ORDER_PAYMENT_METHODS.CASH &&
+    order.paymentMethod !== ORDER_PAYMENT_METHODS.CASH;
+
+  await runAtomicOperation({
+    label: 'orders.markDelivered',
+    transactional: async (session) => {
+      order.status = ORDER_STATUSES.DELIVERED;
+      order.deliveredAt = now;
+
+      // CASH flip at delivery: reverse the existing DEBIT and post a
+      // CASH_COLLECTION CREDIT so the ledger reflects the cash handover
+      // and the cta cte no longer carries the debt.
+      if (isFlippingToCash) {
+        if (order.accountMovementId) {
+          const reversal = await reverseMovement({
+            movementId: order.accountMovementId.toString(),
+            description: 'Cobro en contado al entregar',
+            createdBy: input.driverUserId,
+            session,
+          });
+          order.cancellationMovementId = reversal._id;
+        }
+        if (order.totalFinalMinor > 0) {
+          const movement = await postMovement({
+            clientId: order.clientId.toString(),
+            direction: 'CREDIT',
+            amountMinor: order.totalFinalMinor,
+            movementType: 'CASH_COLLECTION',
+            description: 'Cobro en contado',
+            sourceType: 'ORDER',
+            sourceId: order._id.toString(),
+            idempotencyKey: idempotencyKeyForCashCollection(order._id),
+            createdBy: input.driverUserId,
+            session,
+          });
+          order.accountMovementId = movement._id;
+        }
+        order.paymentMethod = ORDER_PAYMENT_METHODS.CASH;
+        order.paidAt = now;
+      } else if (!order.paidAt) {
+        // ACCOUNT path (or already-CASH). Mark paidAt so admin /
+        // ciudadano can confirm settlement timing.
+        order.paidAt = now;
+      }
+
+      await order.save({ session });
+      return order;
+    },
+    fallback: async () => {
+      // Snapshot previous values so we can compensate on failure.
+      const previousStatus = order.status;
+      const previousDeliveredAt = order.deliveredAt ?? null;
+      const previousPaymentMethod = order.paymentMethod;
+      const previousPaidAt = order.paidAt ?? null;
+      const previousAccountMovementId =
+        order.accountMovementId ?? null;
+      const previousCancellationMovementId =
+        order.cancellationMovementId ?? null;
+
+      order.status = ORDER_STATUSES.DELIVERED;
+      order.deliveredAt = now;
+
+      try {
+        if (isFlippingToCash) {
+          if (order.accountMovementId) {
+            const reversal = await reverseMovement({
+              movementId: order.accountMovementId.toString(),
+              description: 'Cobro en contado al entregar',
+              createdBy: input.driverUserId,
+            });
+            order.cancellationMovementId = reversal._id;
+          }
+          if (order.totalFinalMinor > 0) {
+            const movement = await postMovement({
+              clientId: order.clientId.toString(),
+              direction: 'CREDIT',
+              amountMinor: order.totalFinalMinor,
+              movementType: 'CASH_COLLECTION',
+              description: 'Cobro en contado',
+              sourceType: 'ORDER',
+              sourceId: order._id.toString(),
+              idempotencyKey: idempotencyKeyForCashCollection(order._id),
+              createdBy: input.driverUserId,
+            });
+            order.accountMovementId = movement._id;
+          }
+          order.paymentMethod = ORDER_PAYMENT_METHODS.CASH;
+          order.paidAt = now;
+        } else if (!order.paidAt) {
+          order.paidAt = now;
+        }
+
+        await order.save();
+        return order;
+      } catch (err) {
+        order.status = previousStatus;
+        order.deliveredAt = previousDeliveredAt;
+        order.paymentMethod = previousPaymentMethod;
+        order.paidAt = previousPaidAt;
+        order.accountMovementId = previousAccountMovementId;
+        order.cancellationMovementId = previousCancellationMovementId;
+        try {
+          await order.save();
+        } catch {
+          // best-effort compensation
+        }
+        throw err;
+      }
+    },
+  });
+
   return order;
 }
 

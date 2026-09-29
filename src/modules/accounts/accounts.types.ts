@@ -31,6 +31,7 @@ export const MOVEMENT_TYPES = {
   PAYMENT: 'PAYMENT',
   REVERSAL: 'REVERSAL',
   OPENING_BALANCE: 'OPENING_BALANCE',
+  CASH_COLLECTION: 'CASH_COLLECTION',
 } as const;
 
 export type MovementType = (typeof MOVEMENT_TYPES)[keyof typeof MOVEMENT_TYPES];
@@ -96,6 +97,7 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   PAYMENT: 'Pago',
   REVERSAL: 'Reversión',
   OPENING_BALANCE: 'Saldo inicial',
+  CASH_COLLECTION: 'Cobro en efectivo',
 };
 
 /**

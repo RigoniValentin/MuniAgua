@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   ALL_ORDER_ORIGINS,
+  ALL_ORDER_PAYMENT_METHODS,
   ALL_ORDER_STATUSES,
   MAX_CANCELLATION_REASON_LENGTH,
   MAX_CUSTOMER_NOTE_LENGTH,
@@ -8,6 +9,7 @@ import {
   MIN_QUANTITY_PER_LINE,
   ORDER_LIST_DEFAULT_LIMIT,
   ORDER_LIST_MAX_LIMIT,
+  type OrderPaymentMethod,
 } from './orders.types.js';
 
 const objectIdSchema = z
@@ -46,15 +48,39 @@ export type CreateMyOrderPayload = z.infer<typeof createMyOrderSchema>;
 
 /**
  * Staff direct-order payload (driver or admin creates an Order for a client).
- * Same shape as citizen but includes clientId.
+ * Same shape as citizen but includes clientId and optional paymentMethod.
  */
 export const createStaffOrderSchema = createMyOrderSchema
   .extend({
     clientId: objectIdSchema,
+    paymentMethod: z
+      .enum(
+        ALL_ORDER_PAYMENT_METHODS as unknown as [OrderPaymentMethod, ...OrderPaymentMethod[]],
+      )
+      .optional(),
   })
   .strict();
 
 export type CreateStaffOrderPayload = z.infer<typeof createStaffOrderSchema>;
+
+/**
+ * Driver confirm-delivery payload. Optionally overrides the payment method
+ * (e.g. switch an ACCOUNT order to CASH when the citizen pays cash on
+ * receipt). Empty body is allowed and preserves the original method.
+ */
+export const deliverOrderSchema = z
+  .object({
+    paymentMethod: z
+      .enum(
+        ALL_ORDER_PAYMENT_METHODS as unknown as [OrderPaymentMethod, ...OrderPaymentMethod[]],
+      )
+      .optional(),
+  })
+  .strict()
+  .optional()
+  .default({});
+
+export type DeliverOrderPayload = z.infer<typeof deliverOrderSchema>;
 
 /**
  * Cancellation reason — optional for citizen, required for staff.

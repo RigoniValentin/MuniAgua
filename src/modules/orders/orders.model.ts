@@ -1,8 +1,10 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import {
   ALL_ORDER_ORIGINS,
+  ALL_ORDER_PAYMENT_METHODS,
   ALL_ORDER_STATUSES,
   type OrderOrigin,
+  type OrderPaymentMethod,
   type OrderStatus,
 } from './orders.types.js';
 import type { ClientType } from '../clients/clients.types.js';
@@ -78,6 +80,21 @@ export interface OrderDocument extends Document {
 
   startedDeliveryAt?: Date | null;
   deliveredAt?: Date | null;
+
+  /**
+   * How the order was paid (or will be paid) by the citizen.
+   *   ACCOUNT  - default; the ORDER_CHARGE DEBIT hits the cta cte.
+   *   CASH     - no DEBIT; one CREDIT CASH_COLLECTION movement is recorded
+   *              instead. For CASH deliveries that started life as a CITIZEN
+   *              order, the DEBIT is reversed at deliver time.
+   */
+  paymentMethod: OrderPaymentMethod;
+
+  /**
+   * Timestamp of the actual settlement (collected cash for CASH, or
+   * `deliveredAt` for ACCOUNT). Null while the order is still in flight.
+   */
+  paidAt?: Date | null;
 
   cancelledAt?: Date | null;
   cancellationReason?: string | null;
@@ -175,6 +192,13 @@ const orderSchema = new Schema<OrderDocument, OrderModel>(
     assignedAt: { type: Date, default: null },
     startedDeliveryAt: { type: Date, default: null },
     deliveredAt: { type: Date, default: null },
+    paymentMethod: {
+      type: String,
+      required: true,
+      enum: ALL_ORDER_PAYMENT_METHODS,
+      default: 'ACCOUNT',
+    },
+    paidAt: { type: Date, default: null },
     cancelledAt: { type: Date, default: null },
     cancellationReason: { type: String, trim: true, maxlength: 500, default: null },
     cancellationMovementId: {

@@ -84,3 +84,31 @@ export const MIN_QUANTITY_PER_LINE = 1;
 
 export const ORDER_DELIVERY_CHARGE_IDEMPOTENCY_PREFIX = 'ORDER';
 export const ORDER_DELIVERY_CHARGE_IDEMPOTENCY_SUFFIX = 'CHARGE';
+export const ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX = 'ORDER';
+export const ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX = 'CASH_COLLECTION';
+
+/**
+ * How a delivery's payment is settled when the order is finalized.
+ *
+ *   ACCOUNT  - The customer is debited on their cuenta corriente (DEBIT
+ *              ORDER_CHARGE). This is the historical default.
+ *   CASH     - The repartidor collects cash on delivery. The ledger gets a
+ *              single CREDIT CASH_COLLECTION entry (no DEBIT) so the
+ *              client's cta cte is untouched while the cash receipt is
+ *              audited. When a CITIZEN order is flipped to CASH at deliver
+ *              time, the existing DEBIT is reversed and replaced.
+ */
+export const ORDER_PAYMENT_METHODS = {
+  ACCOUNT: 'ACCOUNT',
+  CASH: 'CASH',
+} as const;
+
+export type OrderPaymentMethod =
+  (typeof ORDER_PAYMENT_METHODS)[keyof typeof ORDER_PAYMENT_METHODS];
+export const ALL_ORDER_PAYMENT_METHODS: OrderPaymentMethod[] =
+  Object.values(ORDER_PAYMENT_METHODS);
+
+export const ORDER_PAYMENT_METHOD_LABEL: Record<OrderPaymentMethod, string> = {
+  ACCOUNT: 'Cuenta corriente',
+  CASH: 'Contado',
+};

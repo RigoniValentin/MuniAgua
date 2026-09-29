@@ -42,6 +42,7 @@ import {
   cancelOrderSchema,
   createMyOrderSchema,
   createStaffOrderSchema,
+  deliverOrderSchema,
   driverOrdersQuerySchema,
   myOrdersQuerySchema,
   staffCancelOrderSchema,
@@ -253,7 +254,12 @@ export const claimMyDeliveryController = asyncHandler(async (req, res) => {
 
 export const deliverMyOrderController = asyncHandler(async (req, res) => {
   const userId = requireUserId(req);
-  const order = await markDelivered(req.params.id!, userId);
+  const payload = deliverOrderSchema.parse(req.body ?? {});
+  const order = await markDelivered({
+    orderId: req.params.id!,
+    driverUserId: userId,
+    paymentMethod: payload.paymentMethod,
+  });
   const dto = await formatForDriver(order);
   res.json(ok({ order: dto }));
 });
@@ -295,6 +301,7 @@ export const createDirectOrderController = asyncHandler(async (req, res) => {
     createdBy: userId,
     initialStatus: ORDER_STATUSES.OUT_FOR_DELIVERY,
     assignTo: userId,
+    paymentMethod: payload.paymentMethod,
   });
   const dto = await formatForDriver(order);
   res.status(201).json(ok({ order: dto }));
