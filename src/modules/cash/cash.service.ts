@@ -28,6 +28,7 @@ import {
   CASH_MOVEMENT_TYPES,
   type CashMovementDto,
   type CashMovementListResult,
+  type CashMovementType,
   type CashSourceType,
   type CashSummary,
   type CashSummaryResponse,
