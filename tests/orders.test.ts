@@ -22,6 +22,7 @@ import { Client } from '../src/modules/clients/clients.model';
 import { Product } from '../src/modules/products/products.model';
 import { PricingRule } from '../src/modules/pricing/pricing.rules.model';
 import { AccountMovement } from '../src/modules/accounts/account-movements.model';
+import { CashMovement } from '../src/modules/cash/cash-movements.model';
 import { Order } from '../src/modules/orders/orders.model';
 
 let app: ReturnType<typeof createApp>;
@@ -686,7 +687,7 @@ describe('Repartidor — entregas', () => {
     expect(movements).toHaveLength(0);
   });
 
-  it('direct-order con CASH → genera 1 CREDIT CASH_COLLECTION y NO DEBIT', async () => {
+  it('direct-order con CASH → genera 1 CashMovement y NO toca la cta cte', async () => {
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({ documentNumber: '777' });
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
@@ -713,14 +714,27 @@ describe('Repartidor — entregas', () => {
     expect(res.body.data.order.paidAt).toBeTruthy();
     expect(res.body.data.order.assignedTo).toBe(driver._id.toString());
 
-    const movements = await AccountMovement.find({ clientId: client._id }).lean();
-    expect(movements).toHaveLength(1);
-    expect(movements[0].direction).toBe('CREDIT');
-    expect(movements[0].amountMinor).toBe(2_500_000);
-    expect(movements[0].movementType).toBe('CASH_COLLECTION');
-    expect(movements[0].sourceType).toBe('ORDER');
-    expect(movements[0].idempotencyKey).toBe(
+    // The cta cte must be untouched — NO AccountMovement was created.
+    const accountMovements = await AccountMovement.find({ clientId: client._id })
+      .lean();
+    expect(accountMovements).toHaveLength(0);
+
+    // The CASH ledger has exactly one entry.
+    const cashMovements = await CashMovement.find({ clientId: client._id }).lean();
+    expect(cashMovements).toHaveLength(1);
+    expect(cashMovements[0].amountMinor).toBe(2_500_000);
+    expect(cashMovements[0].movementType).toBe('CASH_COLLECTION');
+    expect(cashMovements[0].sourceType).toBe('ORDER');
+    expect(cashMovements[0].driverId?.toString()).toBe(driver._id.toString());
+    expect(cashMovements[0].idempotencyKey).toBe(
       `ORDER:${res.body.data.order.id}:CASH_COLLECTION`,
+    );
+
+    // The Order has cashMovementId set, accountMovementId null.
+    const persisted = await Order.findById(res.body.data.order.id).lean();
+    expect(persisted?.accountMovementId).toBeNull();
+    expect(persisted?.cashMovementId?.toString()).toBe(
+      cashMovements[0]._id.toString(),
     );
   });
 
@@ -745,11 +759,14 @@ describe('Repartidor — entregas', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.order.totalFinalMinor).toBe(0);
     expect(res.body.data.order.paymentMethod).toBe('CASH');
-    const movements = await AccountMovement.find({ clientId: client._id }).lean();
-    expect(movements).toHaveLength(0);
+    const accountMovements = await AccountMovement.find({ clientId: client._id })
+      .lean();
+    expect(accountMovements).toHaveLength(0);
+    const cashMovements = await CashMovement.find({ clientId: client._id }).lean();
+    expect(cashMovements).toHaveLength(0);
   });
 
-  it('deliver con CASH sobre pedido CITIZEN revierte el DEBIT y crea CASH_COLLECTION', async () => {
+  it('deliver con CASH sobre pedido CITIZEN revierte el DEBIT en cta cte y crea CashMovement', async () => {
     const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({
@@ -799,34 +816,39 @@ describe('Repartidor — entregas', () => {
     expect(deliverRes.body.data.order.paymentMethod).toBe('CASH');
     expect(deliverRes.body.data.order.paidAt).toBeTruthy();
 
-    // Ledger now: original DEBIT, its REVERSAL, and the CASH_COLLECTION CREDIT.
-    const movementsAfter = await AccountMovement.find({ clientId: client._id })
+    // cta cte: original DEBIT + REVERSAL → net balance = 0.
+    const accountAfter = await AccountMovement.find({ clientId: client._id })
       .sort({ occurredAt: 1 })
       .lean();
-    expect(movementsAfter).toHaveLength(3);
-    expect(movementsAfter[0].movementType).toBe('ORDER_CHARGE');
-    expect(movementsAfter[0].direction).toBe('DEBIT');
-    expect(movementsAfter[1].movementType).toBe('REVERSAL');
-    expect(movementsAfter[1].direction).toBe('CREDIT');
-    expect(movementsAfter[2].movementType).toBe('CASH_COLLECTION');
-    expect(movementsAfter[2].direction).toBe('CREDIT');
-    expect(movementsAfter[2].amountMinor).toBe(1_000_000);
+    expect(accountAfter).toHaveLength(2);
+    expect(accountAfter[0].movementType).toBe('ORDER_CHARGE');
+    expect(accountAfter[0].direction).toBe('DEBIT');
+    expect(accountAfter[1].movementType).toBe('REVERSAL');
+    expect(accountAfter[1].direction).toBe('CREDIT');
+    expect(accountAfter[1].amountMinor).toBe(1_000_000);
 
-    // Net balance is 0 (DEBIT 1.000.000 - REVERSAL 1.000.000 + CASH_COLLECTION 0 → wait).
-    // The REVERSAL auto-inverts direction: it was a DEBIT → its reversal is a CREDIT.
-    // Net balance: +1 (DEBIT) −1 (REVERSAL CREDIT) −1 (CASH_COLLECTION CREDIT) = −1.
-    // That mirrors the standalone CASH order: "saldo a favor" reflects un-reconciled cash.
-    const debits = movementsAfter
-      .filter((m) => m.direction === 'DEBIT')
-      .reduce((acc, m) => acc + m.amountMinor, 0);
-    const credits = movementsAfter
-      .filter((m) => m.direction === 'CREDIT')
-      .reduce((acc, m) => acc + m.amountMinor, 0);
-    expect(debits).toBe(1_000_000);
-    expect(credits).toBe(2_000_000);
+    // Cash ledger: one CASH_COLLECTION.
+    const cashAfter = await CashMovement.find({ clientId: client._id }).lean();
+    expect(cashAfter).toHaveLength(1);
+    expect(cashAfter[0].amountMinor).toBe(1_000_000);
+    expect(cashAfter[0].movementType).toBe('CASH_COLLECTION');
+    expect(cashAfter[0].driverId?.toString()).toBe(driver._id.toString());
+    expect(cashAfter[0].orderId?.toString()).toBe(orderId);
+
+    // The Order now records the cancellationMovementId pointing at the
+    // reversal (cta cte net = 0) and the cashMovementId pointing at
+    // the new CashMovement.
+    const persisted = await Order.findById(orderId).lean();
+    expect(persisted?.cancellationMovementId?.toString()).toBe(
+      accountAfter[1]._id.toString(),
+    );
+    expect(persisted?.cashMovementId?.toString()).toBe(
+      cashAfter[0]._id.toString(),
+    );
+    expect(persisted?.paymentMethod).toBe('CASH');
   });
 
-  it('deliver con CASH idempotente (segunda vez) no duplica CASH_COLLECTION', async () => {
+  it('deliver con CASH idempotente (segunda vez) no duplica CashMovement', async () => {
     const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({
@@ -861,9 +883,11 @@ describe('Repartidor — entregas', () => {
       .post(`/api/delivery/me/orders/${orderId}/deliver`)
       .set('Authorization', `Bearer ${driverToken}`)
       .send({ paymentMethod: 'CASH' });
-    const movementsAfterFirst = await AccountMovement.find({ clientId: client._id })
+    const accountAfterFirst = await AccountMovement.find({ clientId: client._id })
       .lean();
-    expect(movementsAfterFirst).toHaveLength(3);
+    expect(accountAfterFirst).toHaveLength(2);
+    const cashAfterFirst = await CashMovement.find({ clientId: client._id }).lean();
+    expect(cashAfterFirst).toHaveLength(1);
 
     // Re-deliver with CASH — Order is already DELIVERED+CASH, markDelivered
     // returns 409 (terminal state). Confirm we didn't add a movement.
@@ -872,9 +896,11 @@ describe('Repartidor — entregas', () => {
       .set('Authorization', `Bearer ${driverToken}`)
       .send({ paymentMethod: 'CASH' });
     expect(second.status).toBe(409);
-    const movementsAfterSecond = await AccountMovement.find({ clientId: client._id })
+    const accountAfterSecond = await AccountMovement.find({ clientId: client._id })
       .lean();
-    expect(movementsAfterSecond).toHaveLength(3);
+    expect(accountAfterSecond).toHaveLength(2);
+    const cashAfterSecond = await CashMovement.find({ clientId: client._id }).lean();
+    expect(cashAfterSecond).toHaveLength(1);
   });
 });
 

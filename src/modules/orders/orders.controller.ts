@@ -66,6 +66,7 @@ async function formatForSelf(order: OrderDocument) {
     // Citizens never see raw ledger ids.
     includeAccountMovementId: false,
     includeCancellationMovementId: false,
+    includeCashMovementId: false,
   });
 }
 
@@ -74,6 +75,7 @@ async function formatForAdmin(order: OrderDocument) {
     includeClient: true,
     includeAccountMovementId: true,
     includeCancellationMovementId: true,
+    includeCashMovementId: true,
   });
 }
 
@@ -82,6 +84,7 @@ async function formatForDriver(order: OrderDocument) {
     includeClient: true,
     includeAccountMovementId: true,
     includeCancellationMovementId: true,
+    includeCashMovementId: true,
   });
 }
 

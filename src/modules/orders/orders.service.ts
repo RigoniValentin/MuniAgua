@@ -66,6 +66,10 @@ import {
   zoneDeliversOn,
 } from '../delivery-zones/delivery-zones.helpers.js';
 import { getAppToday } from '../../shared/app-date.js';
+import {
+  postCashCollection,
+  reverseCashMovement,
+} from '../cash/cash.service.js';
 
 // ============================================================================
 // Public DTOs
@@ -123,8 +127,17 @@ export interface OrderDto {
   zona: string | null;
   customerNote: string | null;
 
+  /**
+   * cta cte ledger reference. Present for ACCOUNT orders (and their
+   * cancellations). Null when the order was created directly as CASH.
+   */
   accountMovementId?: string | null;
   cancellationMovementId?: string | null;
+
+  /**
+   * CASH ledger reference. Present for CASH orders. Null for ACCOUNT.
+   */
+  cashMovementId?: string | null;
 
   assignedTo?: string | null;
   assignedToName?: string | null;
@@ -207,6 +220,7 @@ export interface ToOrderDtoOptions {
   includeClient?: boolean;
   includeAccountMovementId?: boolean;
   includeCancellationMovementId?: boolean;
+  includeCashMovementId?: boolean;
   assignedToName?: string | null;
 }
 
@@ -272,6 +286,11 @@ export function toOrderDto(
   if (options.includeCancellationMovementId) {
     dto.cancellationMovementId = doc.cancellationMovementId
       ? doc.cancellationMovementId.toString()
+      : null;
+  }
+  if (options.includeCashMovementId) {
+    dto.cashMovementId = doc.cashMovementId
+      ? doc.cashMovementId.toString()
       : null;
   }
   if (options.assignedToName !== undefined) {
@@ -534,26 +553,21 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
 
       // Ledger entries only for orders with a non-zero total. $0 orders
       // (AYUDA_SOCIAL 100% off) skip the ledger entirely — Order remains
-      // valid, accountMovementId stays null.
+      // valid, accountMovementId and cashMovementId both stay null.
       if (totalFinalMinor > 0) {
         if (paymentMethod === ORDER_PAYMENT_METHODS.CASH) {
-          // CASH: no DEBIT. A single CREDIT CASH_COLLECTION entry audits
-          // the cash the repartidor collected. Net balance becomes
-          // negative (saldo a favor) until the cash is reconciled by an
-          // admin (post-MVP cash-up flow).
-          const movement = await postMovement({
+          // CASH: post to the CASH ledger (NOT the cta cte).
+          const movement = await postCashCollection({
             clientId: client._id.toString(),
-            direction: 'CREDIT',
             amountMinor: totalFinalMinor,
-            movementType: 'CASH_COLLECTION',
             description: 'Cobro en contado',
-            sourceType: 'ORDER',
-            sourceId: created._id.toString(),
+            orderId: created._id.toString(),
+            driverId: input.assignTo ?? null,
             idempotencyKey: idempotencyKeyForCashCollection(created._id),
             createdBy: input.createdBy,
             session,
           });
-          created.accountMovementId = movement._id;
+          created.cashMovementId = movement._id;
           await created.save({ session });
         } else {
           const movement = await postMovement({
@@ -598,18 +612,16 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
       try {
         if (totalFinalMinor > 0) {
           if (paymentMethod === ORDER_PAYMENT_METHODS.CASH) {
-            const movement = await postMovement({
+            const movement = await postCashCollection({
               clientId: client._id.toString(),
-              direction: 'CREDIT',
               amountMinor: totalFinalMinor,
-              movementType: 'CASH_COLLECTION',
               description: 'Cobro en contado',
-              sourceType: 'ORDER',
-              sourceId: created._id.toString(),
+              orderId: created._id.toString(),
+              driverId: input.assignTo ?? null,
               idempotencyKey: idempotencyKeyForCashCollection(created._id),
               createdBy: input.createdBy,
             });
-            created.accountMovementId = movement._id;
+            created.cashMovementId = movement._id;
             await created.save();
           } else {
             const movement = await postMovement({
@@ -826,9 +838,10 @@ export async function markDelivered(
       order.status = ORDER_STATUSES.DELIVERED;
       order.deliveredAt = now;
 
-      // CASH flip at delivery: reverse the existing DEBIT and post a
-      // CASH_COLLECTION CREDIT so the ledger reflects the cash handover
-      // and the cta cte no longer carries the debt.
+      // CASH flip at delivery: reverse the existing DEBIT in the
+      // cta cte (so the client doesn't end up in debt) and post a
+      // CASH_COLLECTION on the CASH ledger to audit the cash the
+      // repartidor received.
       if (isFlippingToCash) {
         if (order.accountMovementId) {
           const reversal = await reverseMovement({
@@ -840,19 +853,17 @@ export async function markDelivered(
           order.cancellationMovementId = reversal._id;
         }
         if (order.totalFinalMinor > 0) {
-          const movement = await postMovement({
+          const cash = await postCashCollection({
             clientId: order.clientId.toString(),
-            direction: 'CREDIT',
             amountMinor: order.totalFinalMinor,
-            movementType: 'CASH_COLLECTION',
             description: 'Cobro en contado',
-            sourceType: 'ORDER',
-            sourceId: order._id.toString(),
+            orderId: order._id.toString(),
+            driverId: input.driverUserId,
             idempotencyKey: idempotencyKeyForCashCollection(order._id),
             createdBy: input.driverUserId,
             session,
           });
-          order.accountMovementId = movement._id;
+          order.cashMovementId = cash._id;
         }
         order.paymentMethod = ORDER_PAYMENT_METHODS.CASH;
         order.paidAt = now;
@@ -875,6 +886,7 @@ export async function markDelivered(
         order.accountMovementId ?? null;
       const previousCancellationMovementId =
         order.cancellationMovementId ?? null;
+      const previousCashMovementId = order.cashMovementId ?? null;
 
       order.status = ORDER_STATUSES.DELIVERED;
       order.deliveredAt = now;
@@ -890,18 +902,16 @@ export async function markDelivered(
             order.cancellationMovementId = reversal._id;
           }
           if (order.totalFinalMinor > 0) {
-            const movement = await postMovement({
+            const cash = await postCashCollection({
               clientId: order.clientId.toString(),
-              direction: 'CREDIT',
               amountMinor: order.totalFinalMinor,
-              movementType: 'CASH_COLLECTION',
               description: 'Cobro en contado',
-              sourceType: 'ORDER',
-              sourceId: order._id.toString(),
+              orderId: order._id.toString(),
+              driverId: input.driverUserId,
               idempotencyKey: idempotencyKeyForCashCollection(order._id),
               createdBy: input.driverUserId,
             });
-            order.accountMovementId = movement._id;
+            order.cashMovementId = cash._id;
           }
           order.paymentMethod = ORDER_PAYMENT_METHODS.CASH;
           order.paidAt = now;
@@ -918,6 +928,7 @@ export async function markDelivered(
         order.paidAt = previousPaidAt;
         order.accountMovementId = previousAccountMovementId;
         order.cancellationMovementId = previousCancellationMovementId;
+        order.cashMovementId = previousCashMovementId;
         try {
           await order.save();
         } catch {
@@ -994,9 +1005,11 @@ export async function cancelOrder(
     );
   }
 
-  // If there's a DEBIT linked, reverse it. Atomic with the Order write
-  // when Mongo supports transactions; otherwise we run sequentially and
-  // compensate by flipping the Order back if the reversal fails.
+  // If there's a cta cte DEBIT linked, reverse it. If there's a CASH
+  // collection linked, also reverse it (the cash was never turned in).
+  // Atomic with the Order write when Mongo supports transactions;
+  // otherwise we run sequentially and compensate by flipping the Order
+  // back if the reversal fails.
   await runAtomicOperation({
     label: 'orders.cancelOrder',
     transactional: async (session) => {
@@ -1016,6 +1029,17 @@ export async function cancelOrder(
         });
         order.cancellationMovementId = reversal._id;
       }
+      if (order.cashMovementId) {
+        await reverseCashMovement({
+          movementId: order.cashMovementId.toString(),
+          description: trimmedReason.length > 0
+            ? `Pedido cancelado: ${trimmedReason}`
+            : 'Pedido cancelado',
+          createdBy: input.actorUserId,
+          session,
+        });
+        order.cashMovementId = null;
+      }
       await order.save({ session });
       return order;
     },
@@ -1026,6 +1050,7 @@ export async function cancelOrder(
       const previousReason = order.cancellationReason ?? null;
       const previousCancellationMovementId =
         order.cancellationMovementId ?? null;
+      const previousCashMovementId = order.cashMovementId ?? null;
 
       const now = new Date();
       order.status = ORDER_STATUSES.CANCELLED;
@@ -1043,6 +1068,16 @@ export async function cancelOrder(
           });
           order.cancellationMovementId = reversal._id;
         }
+        if (order.cashMovementId) {
+          await reverseCashMovement({
+            movementId: order.cashMovementId.toString(),
+            description: trimmedReason.length > 0
+              ? `Pedido cancelado: ${trimmedReason}`
+              : 'Pedido cancelado',
+            createdBy: input.actorUserId,
+          });
+          order.cashMovementId = null;
+        }
         await order.save();
         return order;
       } catch (err) {
@@ -1051,6 +1086,7 @@ export async function cancelOrder(
         order.cancelledAt = previousCancelledAt;
         order.cancellationReason = previousReason;
         order.cancellationMovementId = previousCancellationMovementId;
+        order.cashMovementId = previousCashMovementId;
         try {
           await order.save();
         } catch {
@@ -1268,6 +1304,7 @@ export async function listOrders(input: ListOrdersInput): Promise<OrderListResul
       includeClient: true,
       includeAccountMovementId: true,
       includeCancellationMovementId: true,
+      includeCashMovementId: true,
       assignedToName: doc.assignedTo
         ? assignedNames.get(doc.assignedTo.toString()) ?? null
         : null,

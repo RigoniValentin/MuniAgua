@@ -73,7 +73,22 @@ export interface OrderDocument extends Document {
 
   customerNote?: string | null;
 
+  /**
+   * Ledger entry on the client's cuenta corriente.
+   *   - Set for ACCOUNT orders (DEBIT ORDER_CHARGE) and for ACCOUNT orders
+   *     that get cancelled (REVERSAL).
+   *   - Null for orders created directly as CASH (no DEBIT ever happened).
+   *   - When an ACCOUNT order is delivered as CASH, this field is moved
+   *     to point at the REVERSAL movement, so the cta cte net effect
+   *     for the order is 0.
+   */
   accountMovementId?: Types.ObjectId | null;
+
+  /**
+   * Cash-collection entry on the CASH ledger (separate from the
+   * cta cte). Set for CASH orders. Null for ACCOUNT orders.
+   */
+  cashMovementId?: Types.ObjectId | null;
 
   assignedTo?: Types.ObjectId | null;
   assignedAt?: Date | null;
@@ -186,6 +201,11 @@ const orderSchema = new Schema<OrderDocument, OrderModel>(
     accountMovementId: {
       type: Schema.Types.ObjectId,
       ref: 'AccountMovement',
+      default: null,
+    },
+    cashMovementId: {
+      type: Schema.Types.ObjectId,
+      ref: 'CashMovement',
       default: null,
     },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', default: null },

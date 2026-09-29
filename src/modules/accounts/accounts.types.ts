@@ -24,6 +24,9 @@ export const ALL_DIRECTIONS: Direction[] = Object.values(DIRECTIONS);
  * Only MANUAL_ADJUSTMENT and REVERSAL are exposed publicly in FASE 4.
  * The remaining values exist to keep the schema forward-compatible
  * with future Orders / Payments / Deliveries integrations.
+ *
+ * NOTE: cash collections live in their own `CashMovement` collection
+ * (see modules/cash). They do NOT touch the cta cte ledger.
  */
 export const MOVEMENT_TYPES = {
   MANUAL_ADJUSTMENT: 'MANUAL_ADJUSTMENT',
@@ -31,7 +34,6 @@ export const MOVEMENT_TYPES = {
   PAYMENT: 'PAYMENT',
   REVERSAL: 'REVERSAL',
   OPENING_BALANCE: 'OPENING_BALANCE',
-  CASH_COLLECTION: 'CASH_COLLECTION',
 } as const;
 
 export type MovementType = (typeof MOVEMENT_TYPES)[keyof typeof MOVEMENT_TYPES];
@@ -97,7 +99,6 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   PAYMENT: 'Pago',
   REVERSAL: 'Reversión',
   OPENING_BALANCE: 'Saldo inicial',
-  CASH_COLLECTION: 'Cobro en efectivo',
 };
 
 /**
