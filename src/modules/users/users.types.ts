@@ -44,6 +44,8 @@ export const PERMISSIONS = {
   PAYMENTS_SELF: 'payments.self',
   CASH_READ: 'cash.read',
   CASH_SELF: 'cash.self',
+  BANK_INFO_READ: 'bank_info.read',
+  BANK_INFO_MANAGE: 'bank_info.manage',
 } as const;
 
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -52,7 +54,7 @@ export const ALL_PERMISSIONS: Permission[] = Object.values(PERMISSIONS);
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   SUPER_ADMIN: [...ALL_PERMISSIONS],
-ADMIN: [
+  ADMIN: [
     PERMISSIONS.USERS_MANAGE,
     PERMISSIONS.CLIENTS_READ,
     PERMISSIONS.CLIENTS_CREATE,
@@ -77,6 +79,8 @@ ADMIN: [
     PERMISSIONS.ACCOUNTS_ADJUST,
     PERMISSIONS.ACCOUNTS_REVERSE,
     PERMISSIONS.CASH_READ,
+    PERMISSIONS.BANK_INFO_READ,
+    PERMISSIONS.BANK_INFO_MANAGE,
   ],
   OPERADOR: [
     PERMISSIONS.CLIENTS_READ,
@@ -118,6 +122,7 @@ ADMIN: [
     PERMISSIONS.PAYMENTS_SELF,
     PERMISSIONS.ORDERS_SELF,
     PERMISSIONS.CASH_SELF,
+    PERMISSIONS.BANK_INFO_READ,
   ],
 };
 

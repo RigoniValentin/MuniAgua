@@ -11,8 +11,6 @@ export const ALL_PAYMENT_STATUSES: PaymentStatus[] = Object.values(PAYMENT_STATU
 
 export const PAYMENT_METHODS = {
   BANK_TRANSFER: 'BANK_TRANSFER',
-  BANK_DEPOSIT: 'BANK_DEPOSIT',
-  OTHER: 'OTHER',
 } as const;
 
 export type PaymentMethod = (typeof PAYMENT_METHODS)[keyof typeof PAYMENT_METHODS];
@@ -33,8 +31,6 @@ export const PAYMENT_STATUS_LABEL: Record<PaymentStatus, string> = {
 
 export const PAYMENT_METHOD_LABEL: Record<PaymentMethod, string> = {
   BANK_TRANSFER: 'Transferencia bancaria',
-  BANK_DEPOSIT: 'Depósito bancario',
-  OTHER: 'Otro',
 };
 
 export const PAYMENT_STATUS_TONE: Record<

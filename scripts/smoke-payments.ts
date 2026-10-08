@@ -309,7 +309,7 @@ async function main(): Promise<void> {
     .post('/api/payments/me')
     .set('Authorization', `Bearer ${aToken}`)
     .field('amountMinor', '500000')
-    .field('paymentMethod', 'OTHER')
+    .field('paymentMethod', 'BANK_TRANSFER')
     .field('note', 'Pago parcial')
     .attach('receipt', buildPngBytes(), 'receipt2.png');
   if (res.status !== 201) throw new Error(`P2 create ${res.status}`);

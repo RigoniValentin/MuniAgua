@@ -162,7 +162,7 @@ describe('POST /api/payments/me — submission', () => {
       .post('/api/payments/me')
       .set('Authorization', `Bearer ${token}`)
       .field('amountMinor', 50_000)
-      .field('paymentMethod', 'OTHER')
+      .field('paymentMethod', 'BANK_TRANSFER')
       .attach('receipt', buildPdf(), 'receipt.pdf');
     expect(res.status).toBe(201);
   });
