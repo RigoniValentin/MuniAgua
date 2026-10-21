@@ -20,6 +20,7 @@ import ordersRoutes from './modules/orders/orders.routes.js';
 import deliveryRoutes from './modules/orders/delivery.routes.js';
 import cashRoutes from './modules/cash/cash.routes.js';
 import bankInfoRoutes from './modules/bank-info/bank-info.routes.js';
+import reportsRoutes from './modules/reports/reports.routes.js';
 import { paymentSubmitLimiter } from './middlewares/rate-limit.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,6 +70,7 @@ export function createApp(): Application {
   apiRouter.use('/delivery', deliveryRoutes);
   apiRouter.use('/cash', cashRoutes);
   apiRouter.use('/bank-info', bankInfoRoutes);
+  apiRouter.use('/reports', reportsRoutes);
 
   // Mount /api BEFORE static so the API always wins.
   app.use('/api', apiRouter);

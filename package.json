@@ -20,6 +20,7 @@
     "seed:admin": "node node_modules/tsx/dist/cli.mjs scripts/seed-admin.ts",
     "seed:pricing": "node node_modules/tsx/dist/cli.mjs scripts/seed-pricing.ts",
     "seed:demo": "node node_modules/tsx/dist/cli.mjs scripts/seed-demo.ts",
+    "seed:reports": "node node_modules/tsx/dist/cli.mjs scripts/seed-reports.ts",
     "seed:real-users": "node node_modules/tsx/dist/cli.mjs scripts/seed-real-users.ts",
     "cleanup:testing": "node node_modules/tsx/dist/cli.mjs scripts/cleanup-testing.ts",
     "smoke:pricing": "node node_modules/tsx/dist/cli.mjs scripts/smoke-pricing.ts",
