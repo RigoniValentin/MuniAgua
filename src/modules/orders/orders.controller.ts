@@ -296,13 +296,20 @@ export const createDirectOrderController = asyncHandler(async (req, res) => {
     }
   }
 
+  // A direct-order is registered at the client's door: the repartidor went
+  // there because the client asked for a sale, and the goods change hands in
+  // that same visit. Whether it is charged to the cuenta corriente or paid in
+  // cash, there is nothing left to confirm — the order is born DELIVERED and
+  // the extra "marcar como entregado" step would be pure friction.
+  // The full circuit (PENDING → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED)
+  // is reserved for orders the client placed on their own.
   const { order } = await createOrder({
     clientId: payload.clientId,
     origin: 'STAFF',
     items: payload.items,
     customerNote: payload.customerNote ?? null,
     createdBy: userId,
-    initialStatus: ORDER_STATUSES.OUT_FOR_DELIVERY,
+    initialStatus: ORDER_STATUSES.DELIVERED,
     assignTo: userId,
     paymentMethod: payload.paymentMethod,
   });

@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { z } from 'zod';
 import {
   ALL_CLIENT_TYPES,
@@ -19,17 +20,34 @@ const trimmedString = (max: number, message?: string) =>
         .max(max, `Máximo ${max} caracteres`),
     );
 
+/**
+ * Normalises an optional string while preserving the difference between "the
+ * caller did not send this field" and "the caller wants to clear it":
+ *
+ *   absent / undefined → undefined  (leave the stored value alone)
+ *   null / ''          → null       (explicit clear)
+ *
+ * Collapsing `undefined` into `null` here would turn every partial update into a
+ * field wipe, because the service applies `value !== undefined` checks.
+ */
+const blankToNull = (value: string | null | undefined) => {
+  if (value === undefined) return undefined;
+  if (value === null || value.length === 0) return null;
+  return value;
+};
+
 const optionalTrimmedString = (max: number) =>
   z
     .string()
     .max(max)
     .transform((v) => v.trim())
-    .pipe(z.string().max(max))
+    .pipe(
+      z
+        .string()
+        .max(max),
+    )
     .nullish()
-    .transform((v) => {
-      if (v === undefined || v === null) return null;
-      return v.length === 0 ? null : v;
-    });
+    .transform(blankToNull);
 
 const phoneSchema = z
   .string()
@@ -45,10 +63,7 @@ const phoneSchema = z
       }),
   )
   .nullish()
-  .transform((v) => {
-    if (v === undefined || v === null) return null;
-    return v.length === 0 ? null : v;
-  });
+  .transform(blankToNull);
 
 const emailSchema = z
   .string()
@@ -64,10 +79,7 @@ const emailSchema = z
       ),
   )
   .nullish()
-  .transform((v) => {
-    if (v === undefined || v === null) return null;
-    return v.length === 0 ? null : v;
-  });
+  .transform(blankToNull);
 
 const documentNumberSchema = z
   .string()
@@ -122,31 +134,84 @@ export const createClientSchema = z.object({
 
 export type CreateClientInput = z.infer<typeof createClientSchema>;
 
-export const updateClientSchema = z
-  .object({
-    firstName: trimmedString(80, 'El nombre es obligatorio').optional(),
-    lastName: trimmedString(80, 'El apellido es obligatorio').optional(),
-    documentType: z
-      .enum(ALL_DOCUMENT_TYPES as [DocumentType, ...DocumentType[]], {
-        errorMap: () => ({ message: 'Tipo de documento inválido' }),
-      })
-      .optional(),
-    documentNumber: documentNumberSchema.optional(),
-    phone: phoneSchema,
-    email: emailSchema,
-    clientType: z
-      .enum(ALL_CLIENT_TYPES as [ClientType, ...ClientType[]], {
-        errorMap: () => ({ message: 'Tipo de cliente inválido' }),
-      })
-      .optional(),
-address: addressSchema.optional(),
+const documentTypeSchema = z.enum(ALL_DOCUMENT_TYPES as [DocumentType, ...DocumentType[]], {
+  errorMap: () => ({ message: 'Tipo de documento inválido' }),
+});
+
+const clientTypeSchema = z.enum(ALL_CLIENT_TYPES as [ClientType, ...ClientType[]], {
+  errorMap: () => ({ message: 'Tipo de cliente inválido' }),
+});
+
+/**
+ * Every field a staff member may edit on an existing client. Shared by the
+ * single-record `PATCH /:id` and the bulk `PATCH /bulk` so both accept exactly
+ * the same payload — `.strict()` on each caller is the mass-assignment guard.
+ */
+const updatableClientFields = {
+  firstName: trimmedString(80, 'El nombre es obligatorio').optional(),
+  lastName: trimmedString(80, 'El apellido es obligatorio').optional(),
+  documentType: documentTypeSchema.optional(),
+  documentNumber: documentNumberSchema.optional(),
+  phone: phoneSchema,
+  email: emailSchema,
+  clientType: clientTypeSchema.optional(),
+  address: addressSchema.optional(),
   zona: optionalTrimmedString(32),
   notes: optionalTrimmedString(1000),
   active: z.boolean().optional(),
-})
-  .strict();
+};
+
+export const updateClientSchema = z.object(updatableClientFields).strict();
 
 export type UpdateClientInput = z.infer<typeof updateClientSchema>;
+
+// ============================================================================
+// Bulk update — applies the same field set to many clients at once.
+// ============================================================================
+
+/**
+ * Hard cap on a single bulk request. It bounds both `PATCH /bulk` and
+ * `GET /bulk/ids`, so any selection the UI can build is always submittable.
+ * One `bulkWrite` of 1000 single-key updates is a few hundred KB and stays
+ * well inside Mongo's 16 MB command limit.
+ */
+export const BULK_MAX_IDS = 1000;
+
+const objectIdSchema = z
+  .string()
+  .refine((v) => Types.ObjectId.isValid(v), { message: 'Identificador de cliente inválido' });
+
+/**
+ * Bulk changes are deliberately narrower than `updateClientSchema`: the
+ * document pair is backed by a unique compound index, so writing one document
+ * number onto N clients can only ever collide. Rejecting it here turns an
+ * opaque Mongo duplicate-key 500 into an actionable 400.
+ */
+const bulkClientFields = {
+  ...updatableClientFields,
+  documentType: z.never().optional(),
+  documentNumber: z.never().optional(),
+};
+
+const bulkChangesSchema = z
+  .object(bulkClientFields)
+  .strict()
+  .refine(
+    (changes) => Object.values(changes).some((v) => v !== undefined),
+    'Seleccioná al menos un campo a modificar',
+  );
+
+export const bulkUpdateClientsSchema = z
+  .object({
+    ids: z
+      .array(objectIdSchema)
+      .min(1, 'Seleccioná al menos un cliente')
+      .max(BULK_MAX_IDS, `No se pueden modificar más de ${BULK_MAX_IDS} clientes por vez`),
+    changes: bulkChangesSchema,
+  })
+  .strict();
+
+export type BulkUpdateClientsInput = z.infer<typeof bulkUpdateClientsSchema>;
 
 // ============================================================================
 // Citizen self profile — STRICT allow-list.

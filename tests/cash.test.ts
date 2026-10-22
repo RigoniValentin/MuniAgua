@@ -122,6 +122,9 @@ describe('Cash — cta cte vs cash ledger are independent', () => {
         paymentMethod: 'CASH',
       });
     expect(res.status).toBe(201);
+    // Venta en el domicilio: la entrega en contado ya nació entregada.
+    expect(res.body.data.order.status).toBe('DELIVERED');
+    expect(res.body.data.order.deliveredAt).toBeTruthy();
 
     const accountMovements = await AccountMovement.find({ clientId: client._id })
       .lean();
@@ -206,9 +209,9 @@ describe('Cash — cta cte vs cash ledger are independent', () => {
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
     const driverToken = await loginAs('driver@buchardo.gob.ar');
 
-    // CASH direct-order arranca en OUT_FOR_DELIVERY. Lo rebobinamos a
-    // ASSIGNED para que el state-machine permita cancelarlo (el MVP
-    // no permite cancelar OUT_FOR_DELIVERY).
+    // CASH direct-order nace DELIVERED (cobro en el momento). Lo rebobinamos a
+    // ASSIGNED para que el state-machine permita cancelarlo y así exercitar
+    // la reversa del CASHMovement.
     const createRes = await request(app)
       .post('/api/delivery/me/direct-order')
       .set('Authorization', `Bearer ${driverToken}`)

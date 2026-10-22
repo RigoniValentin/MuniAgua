@@ -10,9 +10,26 @@ import {
   listMyDeliveriesController,
   startMyDeliveryController,
 } from './orders.controller.js';
+import {
+  downloadMyHistoryXlsxController,
+  getMyHistoryController,
+} from '../driver-history/driver-history.controller.js';
 
 const router = Router();
 router.use(authenticate);
+
+// Movement history for the authenticated repartidor. Always scoped to
+// `req.user` — the surface never lets a caller ask for someone else's rows.
+router.get(
+  '/me/history',
+  requirePermission(PERMISSIONS.DELIVERY_READ),
+  getMyHistoryController,
+);
+router.get(
+  '/me/history.xlsx',
+  requirePermission(PERMISSIONS.DELIVERY_READ),
+  downloadMyHistoryXlsxController,
+);
 
 router.get(
   '/me/orders',

@@ -19,6 +19,12 @@
  *   DELIVERED  - Terminal.
  *   CANCELLED  - Terminal (reverses the DEBIT when applicable).
  *
+ * A staff direct-order (delivery.create) short-circuits the whole chain: the
+ * repartidor goes to the client's door and registers the sale there, so the
+ * goods change hands in that same visit. It is born DELIVERED — charged to
+ * the cuenta corriente or paid in cash, there is nothing left to confirm.
+ * The full circuit is reserved for orders the client placed on their own.
+ *
  * Admin NO longer assigns drivers — repartidores gestionan y reparten.
  */
 
@@ -96,7 +102,9 @@ export const ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX = 'CASH_COLLECTION';
  *              single CREDIT CASH_COLLECTION entry (no DEBIT) so the
  *              client's cta cte is untouched while the cash receipt is
  *              audited. When a CITIZEN order is flipped to CASH at deliver
- *              time, the existing DEBIT is reversed and replaced.
+ *              time, the existing DEBIT is reversed and replaced. Direct
+ *              orders are born DELIVERED (settled on the spot) regardless
+ *              of the payment method — no delivery confirmation is needed.
  */
 export const ORDER_PAYMENT_METHODS = {
   ACCOUNT: 'ACCOUNT',

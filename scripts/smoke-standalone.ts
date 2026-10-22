@@ -6,13 +6,19 @@
  * vanilla MongoDB standalone server with no `?replicaSet=` flag.
  *
  * Validates:
- *   - Citizen creates Order → DEBIT (fallback path)
- *   - Admin assigns the order
- *   - Driver delivers it
+ *   - Citizen creates Order → PENDING (zona on duty today) + DEBIT
+ *   - Driver claims it from the pool → ASSIGNED
+ *   - Driver starts it → OUT_FOR_DELIVERY
+ *   - Driver delivers it → DELIVERED
  *   - Citizen submits a Payment (PENDING)
  *   - Admin approves → CREDIT
  *   - Balance becomes SETTLED $0
- *   - Driver direct-order (STAFF origin) → DEBIT + OUT_FOR_DELIVERY
+ *   - Driver direct-order (STAFF origin) → DEBIT + DELIVERED, no extra step
+ *
+ * Note: the citizen circuit only runs on a day when a zone is on duty
+ * (ZONA 1 lun/mié/vie, ZONA 2 mar/jue/sáb). On a no-delivery day the
+ * order stays CONFIRMED and can never be claimed, so FLUJO 1 is skipped
+ * with a notice instead of failing the whole smoke.
  *
  * Expected output: ✅ STANDALONE MVP OK
  */
@@ -24,6 +30,7 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import { loadEnv } from '../src/config/env';
 import { detectTransactionSupport, supportsTransactions } from '../src/shared/transactions';
+import { getAppToday } from '../src/shared/app-date';
 import { createApp } from '../src/app';
 import { createUser } from '../src/modules/users/users.service';
 import {
@@ -148,7 +155,7 @@ async function main(): Promise<void> {
       password: 'AdminSecret123',
       role: ROLES.ADMIN,
     });
-    const driverUser = await createUser({
+    await createUser({
       firstName: 'Repartidor',
       lastName: 'Demo',
       email: 'repartidor@demo.local',
@@ -170,6 +177,15 @@ async function main(): Promise<void> {
     // -------------------------------------------------------------------------
     // Clients + Products + Pricing rules
     // -------------------------------------------------------------------------
+    // A citizen order can only be claimed while its zona is on duty, so the
+    // linked client is placed in today's zone. On a no-delivery day there is
+    // no such zone and FLUJO 1 is skipped (see header note).
+    const appToday = getAppToday();
+    const todayZone = appToday.zones[0] ?? null;
+    console.log(
+      `Hoy es ${appToday.weekdayLabel}: reparte ${appToday.zones.join(' y ') || 'ninguna zona'}`,
+    );
+
     const jubiladoClient = await Client.create({
       firstName: 'Vecino',
       lastName: 'Jubilado',
@@ -177,6 +193,7 @@ async function main(): Promise<void> {
       documentNumber: '12345678',
       clientType: 'JUBILADO',
       address: { street: 'Belgrano', number: '250', locality: 'Buchardo' },
+      zona: todayZone,
       userId: citizenUser._id,
       active: true,
     });
@@ -218,108 +235,134 @@ async function main(): Promise<void> {
     });
 
     // -------------------------------------------------------------------------
-    // FLUJO 1 — CIUDADANO → ADMIN → REPARTIDOR → PAGO
+    // FLUJO 1 — CIUDADANO → REPARTIDOR → PAGO
     // -------------------------------------------------------------------------
-    header('FLUJO 1 — CIUDADANO crea pedido, paga y queda al día');
+    if (todayZone === null) {
+      header('FLUJO 1 — OMITIDO (hoy no reparte ninguna zona)');
+      console.log(
+        '⚠️  Sin zonas en servicio hoy, ningún pedido de vecino puede pasar a PENDING ' +
+          'ni ser tomado por un repartidor. Corré el smoke en un día de reparto para ' +
+          'cubrir este flujo.',
+      );
+    } else {
+      header('FLUJO 1 — CIUDADANO crea pedido, el repartidor lo toma y paga');
 
-    let res = await request(app)
-      .post('/api/orders/me')
-      .set('Authorization', `Bearer ${citizenToken}`)
-      .send({
-        items: [
-          { productId: refill._id.toString(), quantity: 1 },
-          { productId: container._id.toString(), quantity: 1 },
-        ],
-        customerNote: 'Pasar después de las 17:00',
-      });
-    if (res.status !== 201) {
-      throw new Error(`Order create failed: ${res.status} ${JSON.stringify(res.body)}`);
-    }
-    const order1Id = res.body.data.order.id;
-    const order1Total = res.body.data.order.totalFinalMinor;
-    if (order1Total !== 1_250_000) {
-      throw new Error(`Expected total $12.500, got ${order1Total}`);
-    }
-    console.log(`Pedido creado ${order1Id.slice(-6)}: CONFIRMED ${ars(order1Total)}`);
+      let res = await request(app)
+        .post('/api/orders/me')
+        .set('Authorization', `Bearer ${citizenToken}`)
+        .send({
+          items: [
+            { productId: refill._id.toString(), quantity: 1 },
+            { productId: container._id.toString(), quantity: 1 },
+          ],
+          customerNote: 'Pasar después de las 17:00',
+        });
+      if (res.status !== 201) {
+        throw new Error(`Order create failed: ${res.status} ${JSON.stringify(res.body)}`);
+      }
+      const order1Id = res.body.data.order.id;
+      const order1Total = res.body.data.order.totalFinalMinor;
+      if (order1Total !== 1_250_000) {
+        throw new Error(`Expected total $12.500, got ${order1Total}`);
+      }
+      // Su zona reparte hoy → el pedido entra directo al pool del repartidor.
+      if (res.body.data.order.status !== 'PENDING') {
+        throw new Error(
+          `Expected PENDING (zona ${todayZone} reparte hoy), got ${res.body.data.order.status}`,
+        );
+      }
+      console.log(`Pedido creado ${order1Id.slice(-6)}: PENDING ${ars(order1Total)}`);
 
-    const debits = await AccountMovement.find({
-      clientId: jubiladoClient._id,
-      movementType: 'ORDER_CHARGE',
-    }).lean();
-    if (debits.length !== 1 || debits[0].amountMinor !== 1_250_000) {
-      throw new Error(`Expected 1 DEBIT $12.500, got ${debits.length}`);
-    }
-    console.log(`Ledger generó DEBIT ${ars(debits[0].amountMinor)} (fallback path)`);
+      const debits = await AccountMovement.find({
+        clientId: jubiladoClient._id,
+        movementType: 'ORDER_CHARGE',
+      }).lean();
+      if (debits.length !== 1 || debits[0].amountMinor !== 1_250_000) {
+        throw new Error(`Expected 1 DEBIT $12.500, got ${debits.length}`);
+      }
+      console.log(`Ledger generó DEBIT ${ars(debits[0].amountMinor)} (fallback path)`);
 
-    res = await request(app)
-      .post(`/api/orders/${order1Id}/assign`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({ userId: driverUser._id.toString() });
-    if (res.body.data.order.status !== 'ASSIGNED') {
-      throw new Error(`Assign failed: ${JSON.stringify(res.body)}`);
-    }
-    console.log('Admin asignó repartidor → ASSIGNED');
+      // El repartidor lo ve en el pool y lo toma por su cuenta.
+      res = await request(app)
+        .get('/api/delivery/me/orders')
+        .set('Authorization', `Bearer ${driverToken}`);
+      if (!res.body.data.items.some((o: { id: string }) => o.id === order1Id)) {
+        throw new Error('Driver does not see the pending order in the pool');
+      }
+      console.log('Repartidor ve el pedido en el pool ✓');
 
-    res = await request(app)
-      .post(`/api/delivery/me/orders/${order1Id}/start`)
-      .set('Authorization', `Bearer ${driverToken}`);
-    if (res.body.data.order.status !== 'OUT_FOR_DELIVERY') {
-      throw new Error(`Start failed: ${JSON.stringify(res.body)}`);
-    }
-    console.log('Repartidor inició → OUT_FOR_DELIVERY');
+      res = await request(app)
+        .post(`/api/delivery/me/orders/${order1Id}/claim`)
+        .set('Authorization', `Bearer ${driverToken}`);
+      if (res.status !== 200) {
+        throw new Error(`Claim failed: ${res.status} ${JSON.stringify(res.body)}`);
+      }
+      if (res.body.data.order.status !== 'ASSIGNED') {
+        throw new Error(`Claim did not assign: ${JSON.stringify(res.body)}`);
+      }
+      console.log('Repartidor tomó el pedido → ASSIGNED');
 
-    res = await request(app)
-      .post(`/api/delivery/me/orders/${order1Id}/deliver`)
-      .set('Authorization', `Bearer ${driverToken}`);
-    if (res.body.data.order.status !== 'DELIVERED') {
-      throw new Error(`Deliver failed: ${JSON.stringify(res.body)}`);
-    }
-    console.log('Repartidor entregó → DELIVERED');
+      res = await request(app)
+        .post(`/api/delivery/me/orders/${order1Id}/start`)
+        .set('Authorization', `Bearer ${driverToken}`);
+      if (res.body.data.order.status !== 'OUT_FOR_DELIVERY') {
+        throw new Error(`Start failed: ${JSON.stringify(res.body)}`);
+      }
+      console.log('Repartidor inició → OUT_FOR_DELIVERY');
 
-    res = await request(app)
-      .post('/api/payments/me')
-      .set('Authorization', `Bearer ${citizenToken}`)
-      .field('amountMinor', '1250000')
-      .field('paymentMethod', 'BANK_TRANSFER')
-      .field('note', 'Pago pedido demo')
-      .attach('receipt', buildPngBytes(), 'transfer.png');
-    if (res.status !== 201) {
-      throw new Error(`Payment submit failed: ${res.status} ${JSON.stringify(res.body)}`);
-    }
-    const paymentId = res.body.data.payment.id;
-    res = await request(app)
-      .get(`/api/payments/me/${paymentId}`)
-      .set('Authorization', `Bearer ${citizenToken}`);
-    if (res.body.data.payment.status !== 'PENDING') {
-      throw new Error(`Expected PENDING, got ${res.body.data.payment.status}`);
-    }
-    console.log('Vecino informó pago → PENDING');
+      res = await request(app)
+        .post(`/api/delivery/me/orders/${order1Id}/deliver`)
+        .set('Authorization', `Bearer ${driverToken}`);
+      if (res.body.data.order.status !== 'DELIVERED') {
+        throw new Error(`Deliver failed: ${JSON.stringify(res.body)}`);
+      }
+      console.log('Repartidor entregó → DELIVERED');
 
-    res = await request(app)
-      .post(`/api/payments/${paymentId}/approve`)
-      .set('Authorization', `Bearer ${adminToken}`);
-    if (res.status !== 200) {
-      throw new Error(`Approve failed: ${res.status} ${JSON.stringify(res.body)}`);
-    }
-    console.log('Admin aprobó → APPROVED + CREDIT');
+      res = await request(app)
+        .post('/api/payments/me')
+        .set('Authorization', `Bearer ${citizenToken}`)
+        .field('amountMinor', '1250000')
+        .field('paymentMethod', 'BANK_TRANSFER')
+        .field('note', 'Pago pedido demo')
+        .attach('receipt', buildPngBytes(), 'transfer.png');
+      if (res.status !== 201) {
+        throw new Error(`Payment submit failed: ${res.status} ${JSON.stringify(res.body)}`);
+      }
+      const paymentId = res.body.data.payment.id;
+      res = await request(app)
+        .get(`/api/payments/me/${paymentId}`)
+        .set('Authorization', `Bearer ${citizenToken}`);
+      if (res.body.data.payment.status !== 'PENDING') {
+        throw new Error(`Expected PENDING, got ${res.body.data.payment.status}`);
+      }
+      console.log('Vecino informó pago → PENDING');
 
-    res = await request(app)
-      .get('/api/accounts/me/summary')
-      .set('Authorization', `Bearer ${citizenToken}`);
-    if (res.body.data.account.status !== 'SETTLED') {
-      throw new Error(`Expected SETTLED, got ${res.body.data.account.status}`);
+      res = await request(app)
+        .post(`/api/payments/${paymentId}/approve`)
+        .set('Authorization', `Bearer ${adminToken}`);
+      if (res.status !== 200) {
+        throw new Error(`Approve failed: ${res.status} ${JSON.stringify(res.body)}`);
+      }
+      console.log('Admin aprobó → APPROVED + CREDIT');
+
+      res = await request(app)
+        .get('/api/accounts/me/summary')
+        .set('Authorization', `Bearer ${citizenToken}`);
+      if (res.body.data.account.status !== 'SETTLED') {
+        throw new Error(`Expected SETTLED, got ${res.body.data.account.status}`);
+      }
+      if (res.body.data.account.balanceMinor !== 0) {
+        throw new Error(`Expected balance 0, got ${res.body.data.account.balanceMinor}`);
+      }
+      console.log(`Saldo ${ars(res.body.data.account.balanceMinor)} → SETTLED`);
     }
-    if (res.body.data.account.balanceMinor !== 0) {
-      throw new Error(`Expected balance 0, got ${res.body.data.account.balanceMinor}`);
-    }
-    console.log(`Saldo ${ars(res.body.data.account.balanceMinor)} → SETTLED`);
 
     // -------------------------------------------------------------------------
     // FLUJO 2 — REPARTIDOR entrega directa (STAFF origin)
     // -------------------------------------------------------------------------
     header('FLUJO 2 — Repartidor entrega directa (direct-order)');
 
-    res = await request(app)
+    const res = await request(app)
       .post('/api/delivery/me/direct-order')
       .set('Authorization', `Bearer ${driverToken}`)
       .send({
@@ -331,14 +374,14 @@ async function main(): Promise<void> {
     if (res.status !== 201) {
       throw new Error(`Direct order failed: ${res.status} ${JSON.stringify(res.body)}`);
     }
-    if (res.body.data.order.status !== 'OUT_FOR_DELIVERY') {
-      throw new Error(`Direct order expected OUT_FOR_DELIVERY, got ${res.body.data.order.status}`);
+    if (res.body.data.order.status !== 'DELIVERED') {
+      throw new Error(`Direct order expected DELIVERED, got ${res.body.data.order.status}`);
     }
     if (res.body.data.order.totalFinalMinor !== 2_000_000) {
       throw new Error(`Direct order expected $20.000, got ${res.body.data.order.totalFinalMinor}`);
     }
     console.log(
-      `Direct-order creado ${res.body.data.order.id.slice(-6)}: OUT_FOR_DELIVERY ${ars(res.body.data.order.totalFinalMinor)}`,
+      `Direct-order creado ${res.body.data.order.id.slice(-6)}: DELIVERED ${ars(res.body.data.order.totalFinalMinor)} (sin paso extra de confirmación)`,
     );
 
     const directDebits = await AccountMovement.find({
@@ -349,14 +392,6 @@ async function main(): Promise<void> {
       throw new Error(`Direct-order: expected 1 DEBIT $20.000`);
     }
     console.log(`Ledger generó DEBIT ${ars(directDebits[0].amountMinor)}`);
-
-    res = await request(app)
-      .post(`/api/delivery/me/orders/${res.body.data.order.id}/deliver`)
-      .set('Authorization', `Bearer ${driverToken}`);
-    if (res.body.data.order.status !== 'DELIVERED') {
-      throw new Error(`Deliver failed: ${JSON.stringify(res.body)}`);
-    }
-    console.log('Direct-order entregado → DELIVERED');
 
     // Final sanity: count orders and movements
     const orderCount = await Order.countDocuments({});

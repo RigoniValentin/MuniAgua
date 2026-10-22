@@ -927,12 +927,21 @@ El módulo `src/modules/orders/` implementa el circuito principal de la DEMO MVP
 ### Estados
 
 ```
-CONFIRMED → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED
+CONFIRMED → PENDING → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED
 CONFIRMED → CANCELLED
+PENDING   → CANCELLED
 ASSIGNED  → CANCELLED
 ```
 
 `DELIVERED` y `CANCELLED` son terminales. `OUT_FOR_DELIVERY → CANCELLED` no se permite en el MVP.
+
+El reparto lo toma el propio repartidor: no existe asignación manual por parte de admin
+(`POST /api/orders/:id/assign` y `GET /api/orders/available-drivers` fueron eliminados).
+
+Una **entrega directa** (`POST /api/delivery/me/direct-order`, creada por el repartidor en la
+casa del cliente) no recorre el circuito: nace `DELIVERED`, se haya cargado a la cuenta
+corriente o se haya cobrado en efectivo. El circuito completo queda para los pedidos que
+hizo el vecino por su cuenta.
 
 ### Snapshot de precios
 
@@ -951,12 +960,11 @@ Al crear un pedido el backend **recalcula** el precio con el `Pricing Engine` y 
 | GET    | `/api/orders/me/:id`             | `orders.self` |
 | POST   | `/api/orders/me/:id/cancel`      | `orders.self` |
 | GET    | `/api/orders`                    | `orders.read` |
-| GET    | `/api/orders/available-drivers`  | `orders.assign` |
 | GET    | `/api/orders/:id`                | `orders.read` |
-| POST   | `/api/orders/:id/assign`         | `orders.assign` |
 | POST   | `/api/orders/:id/cancel`         | `orders.cancel` |
 | GET    | `/api/delivery/me/orders`        | `delivery.read` |
 | GET    | `/api/delivery/me/orders/:id`    | `delivery.read` |
+| POST   | `/api/delivery/me/orders/:id/claim`   | `delivery.claim` |
 | POST   | `/api/delivery/me/orders/:id/start`   | `delivery.update` |
 | POST   | `/api/delivery/me/orders/:id/deliver` | `delivery.update` |
 | POST   | `/api/delivery/me/direct-order`  | `delivery.create` |
@@ -1025,10 +1033,9 @@ Al crear un pedido el backend **recalcula** el precio con el `Pricing Engine` y 
    ```
 4. Recorrido sugerido:
    - Login `ciudadano@demo.local` → Hacer pedido → Confirmar.
-   - Login `admin@demo.local` → Inicio → ver "Pedidos por asignar" → Pedidos → Asignar repartidor.
-   - Login `repartidor@demo.local` → Iniciar → Marcar entregado.
+   - Login `repartidor@demo.local` → Inicio → Tomar pedido → Iniciar reparto → Marcar entregado.
    - Login `ciudadano@demo.local` → Informar pago → $0 en cuenta.
-   - Login `repartidor@demo.local` → Nueva entrega (buscar cliente LOCAL) → Confirmar → Entregar.
+   - Login `repartidor@demo.local` → Nueva entrega (buscar cliente LOCAL) → Elegir forma de pago → Confirmar.
 
 5. Smoke tests E2E:
    ```

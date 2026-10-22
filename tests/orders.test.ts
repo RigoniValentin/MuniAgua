@@ -632,7 +632,7 @@ describe('Repartidor — entregas', () => {
     expect(res.status).toBe(404);
   });
 
-  it('direct-order genera Order + DEBIT y arranca en OUT_FOR_DELIVERY', async () => {
+  it('direct-order a cta cte → nace DELIVERED (sin paso extra) y genera el DEBIT', async () => {
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({ documentNumber: '999' });
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
@@ -654,7 +654,11 @@ describe('Repartidor — entregas', () => {
       });
     expect(res.status).toBe(201);
     expect(res.body.data.order.origin).toBe('STAFF');
-    expect(res.body.data.order.status).toBe('OUT_FOR_DELIVERY');
+    // El repartidor fue a la casa del cliente: la entrega ya ocurrió.
+    expect(res.body.data.order.status).toBe('DELIVERED');
+    expect(res.body.data.order.deliveredAt).toBeTruthy();
+    expect(res.body.data.order.paidAt).toBeTruthy();
+    expect(res.body.data.order.paymentMethod).toBe('ACCOUNT');
     expect(res.body.data.order.assignedTo).toBe(driver._id.toString());
     expect(res.body.data.order.totalFinalMinor).toBe(2_500_000);
 
@@ -687,7 +691,7 @@ describe('Repartidor — entregas', () => {
     expect(movements).toHaveLength(0);
   });
 
-  it('direct-order con CASH → genera 1 CashMovement y NO toca la cta cte', async () => {
+  it('direct-order con CASH → nace DELIVERED (sin paso extra) y genera 1 CashMovement', async () => {
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({ documentNumber: '777' });
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
@@ -714,6 +718,12 @@ describe('Repartidor — entregas', () => {
     expect(res.body.data.order.paidAt).toBeTruthy();
     expect(res.body.data.order.assignedTo).toBe(driver._id.toString());
 
+    // The repartidor sells at the door: the order is already delivered,
+    // so no "marcar como entregado" step is needed afterwards.
+    expect(res.body.data.order.status).toBe('DELIVERED');
+    expect(res.body.data.order.deliveredAt).toBeTruthy();
+    expect(res.body.data.order.startedDeliveryAt).toBeTruthy();
+
     // The cta cte must be untouched — NO AccountMovement was created.
     const accountMovements = await AccountMovement.find({ clientId: client._id })
       .lean();
@@ -738,7 +748,39 @@ describe('Repartidor — entregas', () => {
     );
   });
 
-  it('direct-order con CASH y total 0 (AYUDA_SOCIAL) → no genera movimiento', async () => {
+  it('ningún direct-order aparece en el reparto pendiente (todos nacen entregados)', async () => {
+    await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const cashClient = await seedClient({ documentNumber: 'POOL-CASH' });
+    const accountClient = await seedClient({ documentNumber: 'POOL-ACCOUNT' });
+    const refill = await seedProduct({ basePriceMinor: 1_000_000 });
+    const driverToken = await loginAs('driver@buchardo.gob.ar');
+
+    // El repartidor fue a la casa del cliente: cualquier medio de pago
+    // queda liquidado en el momento, sin paso de confirmación pendiente.
+    for (const [client, paymentMethod] of [
+      [cashClient, 'CASH'],
+      [accountClient, 'ACCOUNT'],
+    ] as const) {
+      const res = await request(app)
+        .post('/api/delivery/me/direct-order')
+        .set('Authorization', `Bearer ${driverToken}`)
+        .send({
+          clientId: client._id.toString(),
+          items: [{ productId: refill._id.toString(), quantity: 1 }],
+          paymentMethod,
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.data.order.status).toBe('DELIVERED');
+    }
+
+    const listRes = await request(app)
+      .get('/api/delivery/me/orders')
+      .set('Authorization', `Bearer ${driverToken}`);
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.data.items).toHaveLength(0);
+  });
+
+  it('direct-order con CASH y total 0 (AYUDA_SOCIAL) → nace DELIVERED sin movimiento', async () => {
     await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({
       clientType: 'AYUDA_SOCIAL',
@@ -759,6 +801,7 @@ describe('Repartidor — entregas', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.order.totalFinalMinor).toBe(0);
     expect(res.body.data.order.paymentMethod).toBe('CASH');
+    expect(res.body.data.order.status).toBe('DELIVERED');
     const accountMovements = await AccountMovement.find({ clientId: client._id })
       .lean();
     expect(accountMovements).toHaveLength(0);

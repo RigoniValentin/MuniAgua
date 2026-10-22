@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import {
+  bulkUpdateClientsController,
   createClientController,
   deleteCitizenAccessController,
   getCitizenAccessController,
   getClientController,
   getSelfClientController,
+  listClientIdsController,
   listClientsController,
   postCitizenAccessController,
   updateClientController,
@@ -49,6 +51,18 @@ router.delete(
 );
 
 // Staff CRUD.
+// IMPORTANT: /bulk MUST be registered before /:id so Express never treats
+// "bulk" as an ObjectId.
+router.get(
+  '/bulk/ids',
+  requirePermission(PERMISSIONS.CLIENTS_UPDATE),
+  listClientIdsController,
+);
+router.patch(
+  '/bulk',
+  requirePermission(PERMISSIONS.CLIENTS_UPDATE),
+  bulkUpdateClientsController,
+);
 router.get('/', requirePermission(PERMISSIONS.CLIENTS_READ), listClientsController);
 router.get('/:id', requirePermission(PERMISSIONS.CLIENTS_READ), getClientController);
 router.post('/', requirePermission(PERMISSIONS.CLIENTS_CREATE), createClientController);

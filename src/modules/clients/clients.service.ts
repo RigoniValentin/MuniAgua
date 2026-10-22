@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import { Client, type ClientAddress, type ClientDocument } from './clients.model.js';
 import {
   type ClientListQuery,
+  BULK_MAX_IDS,
   LIST_DEFAULT_LIMIT,
   classifyIdentifier,
   normalizeDni,
@@ -127,10 +128,8 @@ function buildSearchFilter(search: string | undefined) {
 
 const SEARCH_COLLATION = { locale: 'es', strength: 2 } as const;
 
-export async function listClients(query: ClientListQuery): Promise<ClientListResult> {
-  const page = query.page ?? 1;
-  const limit = query.limit ?? LIST_DEFAULT_LIMIT;
-
+/** Translate the query-string filters into a Mongo filter. */
+function buildClientListFilter(query: ClientListQuery): Record<string, unknown> {
   const filter: Record<string, unknown> = {};
   if (query.clientType) {
     filter.clientType = query.clientType;
@@ -142,7 +141,11 @@ export async function listClients(query: ClientListQuery): Promise<ClientListRes
   if (searchFilter) {
     Object.assign(filter, searchFilter);
   }
+  return filter;
+}
 
+/** Deterministic multi-key sort so paging never repeats or drops a row. */
+function buildClientListSort(query: ClientListQuery): Record<string, 1 | -1> {
   const sort: Record<string, 1 | -1> = {
     [query.sortBy]: query.sortOrder === 'desc' ? -1 : 1,
   };
@@ -152,6 +155,15 @@ export async function listClients(query: ClientListQuery): Promise<ClientListRes
   if (query.sortBy !== 'firstName') {
     sort.firstName = 1;
   }
+  return sort;
+}
+
+export async function listClients(query: ClientListQuery): Promise<ClientListResult> {
+  const page = query.page ?? 1;
+  const limit = query.limit ?? LIST_DEFAULT_LIMIT;
+
+  const filter = buildClientListFilter(query);
+  const sort = buildClientListSort(query);
 
   const [docs, total] = await Promise.all([
     Client.find(filter)
@@ -166,6 +178,43 @@ export async function listClients(query: ClientListQuery): Promise<ClientListRes
   return {
     items: docs.map(toClientDto),
     pagination: { page, limit, total, pages },
+  };
+}
+
+export interface ClientIdListResult {
+  ids: string[];
+  /** Total rows matching the filter, regardless of the cap. */
+  total: number;
+  /** True when `total` exceeds the returned ids — the UI must warn. */
+  truncated: boolean;
+}
+
+/**
+ * Resolves every client id matching the current filters, for "select all
+ * results" in the admin bulk editor.
+ *
+ * Pagination and sorting are ignored on purpose — the caller wants the whole
+ * set, not one page. The result is capped at `BULK_MAX_IDS`, the same ceiling
+ * `bulkUpdateClients` accepts, so a selection made through the UI can always be
+ * submitted without a second failure.
+ */
+export async function listClientIds(query: ClientListQuery): Promise<ClientIdListResult> {
+  const filter = buildClientListFilter(query);
+  const sort = buildClientListSort(query);
+
+  const [docs, total] = await Promise.all([
+    Client.find(filter)
+      .select('_id')
+      .sort(sort)
+      .collation(SEARCH_COLLATION)
+      .limit(BULK_MAX_IDS),
+    Client.countDocuments(filter),
+  ]);
+
+  return {
+    ids: docs.map((doc) => doc._id.toString()),
+    total,
+    truncated: total > docs.length,
   };
 }
 
@@ -269,6 +318,92 @@ export async function updateClient(
 
   await client.save();
   return client;
+}
+
+// ============================================================================
+// Bulk update — one write for many clients (tipo de cliente, estado, zona, …)
+// ============================================================================
+
+export interface BulkUpdateClientsResult {
+  /** Unique ids received, after de-duplication. */
+  requested: number;
+  /** Clients that actually exist. */
+  matched: number;
+  /** Clients whose stored values actually changed. */
+  modified: number;
+  /** Ids that no longer resolve to a client. */
+  notFound: string[];
+}
+
+export interface BulkUpdateClientsArgs {
+  ids: string[];
+  changes: UpdateClientArgs;
+  updatedBy?: string | null;
+}
+
+function isSameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  if (typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => isSameValue(item, b[i]));
+  }
+  const aKeys = Object.keys(a as Record<string, unknown>);
+  const bKeys = Object.keys(b as Record<string, unknown>);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(b, key) &&
+      isSameValue(
+        (a as Record<string, unknown>)[key],
+        (b as Record<string, unknown>)[key],
+      ),
+  );
+}
+
+/**
+ * Applies one field set to many clients. Each client is diffed first and only
+ * the ones that genuinely change are written, in a single `bulkWrite`.
+ *
+ * Diffing is what makes `modified` meaningful and keeps `updatedBy` /
+ * `updatedAt` honest: stamping them unconditionally would bump `updatedAt` on
+ * every selected client, so a no-op batch would still look like N changes.
+ */
+export async function bulkUpdateClients(
+  args: BulkUpdateClientsArgs,
+): Promise<BulkUpdateClientsResult> {
+  const uniqueIds = [...new Set(args.ids)];
+  const objectIds = uniqueIds.map((id) => new Types.ObjectId(id));
+
+  const { updatedBy, ...changes } = args.changes;
+  const updatedById =
+    updatedBy && Types.ObjectId.isValid(updatedBy) ? new Types.ObjectId(updatedBy) : null;
+
+  const docs = await Client.find({ _id: { $in: objectIds } });
+  const foundIds = new Set(docs.map((doc) => doc._id.toString()));
+  const notFound = uniqueIds.filter((id) => !foundIds.has(id));
+
+  const ops = docs.flatMap((doc) => {
+    const $set: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(changes)) {
+      if (value === undefined) continue;
+      const current = (doc as unknown as Record<string, unknown>)[field];
+      if (isSameValue(current, value)) continue;
+      $set[field] = value;
+    }
+    if (Object.keys($set).length === 0) return [];
+    if (updatedById) $set.updatedBy = updatedById;
+    return [{ updateOne: { filter: { _id: doc._id }, update: { $set } } }];
+  });
+
+  let modified = 0;
+  if (ops.length > 0) {
+    const result = await Client.bulkWrite(ops, { ordered: false });
+    modified = result.modifiedCount ?? 0;
+  }
+
+  return { requested: uniqueIds.length, matched: docs.length, modified, notFound };
 }
 
 // ============================================================================

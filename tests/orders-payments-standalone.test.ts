@@ -233,7 +233,7 @@ describe('Standalone — orders', () => {
     expect(reversal!.direction).toBe('CREDIT');
   });
 
-  it('7) direct-order + DEBIT arranca en OUT_FOR_DELIVERY', async () => {
+  it('7) direct-order + DEBIT nace DELIVERED', async () => {
     const _driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedLinkedClient(undefined as unknown as Types.ObjectId, 'LOCAL');
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
@@ -247,7 +247,7 @@ describe('Standalone — orders', () => {
         items: [{ productId: refill._id.toString(), quantity: 1 }],
       });
     expect(res.status).toBe(201);
-    expect(res.body.data.order.status).toBe('OUT_FOR_DELIVERY');
+    expect(res.body.data.order.status).toBe('DELIVERED');
     expect(res.body.data.order.totalFinalMinor).toBe(1_000_000);
     const movements = await AccountMovement.find({ clientId: client._id }).lean();
     expect(movements).toHaveLength(1);

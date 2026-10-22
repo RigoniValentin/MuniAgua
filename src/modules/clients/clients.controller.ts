@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import {
+  bulkUpdateClientsSchema,
   clientListQuerySchema,
   createClientSchema,
   linkCitizenAccessSchema,
@@ -8,12 +9,14 @@ import {
   updateSelfClientSchema,
 } from './clients.validation.js';
 import {
+  bulkUpdateClients,
   createClient,
   getClientOrThrow,
   getCitizenAccess,
   getSelfClientOrThrow,
   linkCitizenAccess,
   listClients,
+  listClientIds,
   toCitizenClientDto,
   toClientDto,
   unlinkCitizenAccess,
@@ -27,6 +30,16 @@ import { ValidationError } from '../../shared/errors.js';
 export const listClientsController = asyncHandler(async (req: Request, res: Response) => {
   const query = clientListQuerySchema.parse(req.query);
   const result = await listClients(query);
+  res.json(ok(result));
+});
+
+/**
+ * Ids matching the same filters as `GET /`, for the admin "select all results"
+ * bulk action. Pagination is ignored — the caller wants the whole set.
+ */
+export const listClientIdsController = asyncHandler(async (req: Request, res: Response) => {
+  const query = clientListQuerySchema.parse(req.query);
+  const result = await listClientIds(query);
   res.json(ok(result));
 });
 
@@ -62,6 +75,18 @@ export const updateClientController = asyncHandler(async (req: Request, res: Res
   const client = await updateClient(id, { ...data, updatedBy });
   res.json(ok({ client: toClientDto(client) }));
 });
+
+export const bulkUpdateClientsController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { ids, changes } = bulkUpdateClientsSchema.parse(req.body);
+    const result = await bulkUpdateClients({
+      ids,
+      changes,
+      updatedBy: req.user?.id ?? null,
+    });
+    res.json(ok(result));
+  },
+);
 
 // ============================================================================
 // Citizen self endpoints — registered before /:id so Express never maps "me"

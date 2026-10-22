@@ -310,9 +310,11 @@ export interface CreateOrderInput {
   customerNote?: string | null;
   createdBy: string;
   /**
-   * Optional override for the initial status (used by staff direct-order
-   * to skip the CONFIRMED → ASSIGNED trip and start at OUT_FOR_DELIVERY).
-   * Must still satisfy a valid transition from CONFIRMED if non-default.
+   * Optional override for the initial status (used by staff direct-order to
+   * skip the whole CONFIRMED → ASSIGNED → OUT_FOR_DELIVERY chain — the
+   * repartidor is standing at the door, so the visit is already done). Both
+   * OUT_FOR_DELIVERY and DELIVERED are supported and both require
+   * `assignTo`; any other explicit status is rejected.
    */
   initialStatus?: OrderStatus;
   /**
@@ -483,17 +485,22 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
   const zonaSnapshot = buildZonaSnapshot(client);
 
   // Determine initial status:
-  //   - Staff direct-order (when assignTo is provided) → OUT_FOR_DELIVERY.
+  //   - Staff direct-order → OUT_FOR_DELIVERY or DELIVERED (the goods
+  //     change hands in the same visit the order is registered).
   //   - Citizen order (or any non-direct staff): if the client's zona
-  //     delivers today → PENDING, else CONFIRMED.
+  //     delivers today → PENDING, else CONFIRMED. These walk the full
+  //     circuit: PENDING → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED.
   let initialStatus: OrderStatus;
-  if (input.initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY) {
+  if (
+    input.initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY ||
+    input.initialStatus === ORDER_STATUSES.DELIVERED
+  ) {
     if (!input.assignTo) {
       throw new ValidationError(
-        'Para iniciar como OUT_FOR_DELIVERY se requiere assignTo',
+        `Para iniciar como ${input.initialStatus} se requiere assignTo`,
       );
     }
-    initialStatus = ORDER_STATUSES.OUT_FOR_DELIVERY;
+    initialStatus = input.initialStatus;
   } else if (input.initialStatus) {
     throw new ValidationError(
       `Estado inicial ${input.initialStatus} no soportado en creación directa`,
@@ -509,13 +516,18 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
 
   const paymentMethod: OrderPaymentMethod =
     input.paymentMethod ?? ORDER_PAYMENT_METHODS.ACCOUNT;
+  const isDeliveredOnCreate = initialStatus === ORDER_STATUSES.DELIVERED;
+  // Anything past CONFIRMED implies the repartidor already picked the goods
+  // up (or never left the door), so the trip is stamped right away.
   const isOutForDeliveryOnCreate =
-    initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY;
-  // For CASH orders created directly as OUT_FOR_DELIVERY we treat the order
-  // as already settled at creation time — the repartidor hands over goods
-  // and cash in the same visit, so paidAt = createdAt.
+    initialStatus === ORDER_STATUSES.OUT_FOR_DELIVERY || isDeliveredOnCreate;
+  // For direct orders we treat the order as settled at creation time — the
+  // repartidor hands over goods and (cash, or the cta cte charge) in the
+  // same visit, so paidAt = createdAt. Orders born DELIVERED are settled by
+  // definition.
   const isAlreadySettledAtCreate =
-    isOutForDeliveryOnCreate && paymentMethod === ORDER_PAYMENT_METHODS.CASH;
+    isDeliveredOnCreate ||
+    (isOutForDeliveryOnCreate && paymentMethod === ORDER_PAYMENT_METHODS.CASH);
 
   // Run the Order + ledger write atomically. When MongoDB supports
   // transactions, both writes live inside a single session; otherwise
@@ -542,6 +554,7 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
               : null,
             assignedAt: input.assignTo ? now : null,
             startedDeliveryAt: isOutForDeliveryOnCreate ? now : null,
+            deliveredAt: isDeliveredOnCreate ? now : null,
             paymentMethod,
             paidAt: isAlreadySettledAtCreate ? now : null,
             createdBy: new Types.ObjectId(input.createdBy),
@@ -605,6 +618,7 @@ export async function createOrder(input: CreateOrderInput): Promise<CreateOrderR
           : null,
         assignedAt: input.assignTo ? now : null,
         startedDeliveryAt: isOutForDeliveryOnCreate ? now : null,
+        deliveredAt: isDeliveredOnCreate ? now : null,
         paymentMethod,
         paidAt: isAlreadySettledAtCreate ? now : null,
         createdBy: new Types.ObjectId(input.createdBy),
