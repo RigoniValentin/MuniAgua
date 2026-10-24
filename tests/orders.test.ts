@@ -1086,7 +1086,7 @@ describe('Repartidor — filtro por zona', () => {
   });
 
   it('listMyDeliveries filtra PENDING por zona; assigned-to-me siempre visible', async () => {
-    const driver = await seedUser(
+    const _driver = await seedUser(
       'REPARTIDOR',
       'zone-driver@buchardo.gob.ar',
     );

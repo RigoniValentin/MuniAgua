@@ -664,54 +664,23 @@ export async function listAccounts(
   const search = buildClientSearchFilter(query.search);
   if (search) Object.assign(clientFilter, search);
 
-  // Step 1: total matching clients BEFORE balance filter (used for metadata).
-  const totalClients = await Client.countDocuments(clientFilter);
+  // The balance filter MUST be applied BEFORE pagination.
+  //
+  // Paginating over the unfiltered dataset and filtering the page afterwards
+  // silently drops every matching client that doesn't happen to fall into the
+  // requested page: on a 350-client padrón, `?balanceStatus=DEBT` would only
+  // show the debtors that sort first, while `pagination.total` (computed over
+  // the whole dataset) would report the correct number — an inconsistency the
+  // admin UI surfaces as "missing" debtors.
+  let total: number;
+  let clientDocs: ClientDocument[];
 
-  // Step 2: load the page of clients.
-  const clientDocs = await Client.find(clientFilter)
-    .sort({ lastName: 1, firstName: 1 })
-    .collation(SEARCH_COLLATION)
-    .skip((page - 1) * limit)
-    .limit(limit);
-
-  const ids = clientDocs.map((c) => c._id);
-  const totalsMap = await aggregateAccountsForClients(ids);
-
-  // Step 3: build per-client summary with balance.
-  let pageItems: ClientWithTotals[] = clientDocs.map((c) => {
-    const totals = totalsMap.get(c._id.toString());
-    const debits = totals?.debits ?? 0;
-    const credits = totals?.credits ?? 0;
-    const balance = debits - credits;
-    return {
-      _id: c._id,
-      firstName: c.firstName,
-      lastName: c.lastName,
-      documentType: c.documentType,
-      documentNumber: c.documentNumber,
-      clientType: c.clientType,
-      active: c.active,
-      userId: c.userId ?? null,
-      totalDebitsMinor: debits,
-      totalCreditsMinor: credits,
-      balanceMinor: balance,
-      status: statusFromBalance(balance),
-      lastMovementAt: totals?.last ?? null,
-    };
-  });
-
-  // Step 4: balance filter, if requested, must be applied BEFORE the metadata
-  // recomputation so the pagination totals reflect the filtered dataset.
-  let total = totalClients;
   if (query.balanceStatus) {
-    pageItems = pageItems.filter((c) => c.status === query.balanceStatus);
-
-    // Recompute `total` only when balance filtering is in play: paginate over
-    // the filtered dataset using a bounded aggregation.
     const matchStage: Record<string, unknown> = {};
     if (Object.keys(clientFilter).length > 0) {
       Object.assign(matchStage, clientFilter);
     }
+
     const pipeline: PipelineStage[] = [];
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
@@ -771,12 +740,61 @@ export async function listAccounts(
         },
       },
       { $match: { status: query.balanceStatus } },
-      { $count: 'count' },
+      { $sort: { lastName: 1, firstName: 1 } },
+      { $project: { _id: 1 } },
     );
 
-    const counts = await Client.aggregate<{ count: number }>(pipeline);
-    total = counts[0]?.count ?? 0;
+    const matched = await Client.aggregate<{ _id: Types.ObjectId }>(pipeline).collation(
+      SEARCH_COLLATION,
+    );
+
+    total = matched.length;
+
+    const pageIds = matched
+      .slice((page - 1) * limit, (page - 1) * limit + limit)
+      .map((row) => row._id);
+
+    const docs = await Client.find({ _id: { $in: pageIds } });
+    // Restore the aggregated order (the `$in` query doesn't guarantee it).
+    const position = new Map(pageIds.map((id, index) => [id.toString(), index]));
+    clientDocs = docs.sort(
+      (a, b) =>
+        (position.get(a._id.toString()) ?? 0) - (position.get(b._id.toString()) ?? 0),
+    );
+  } else {
+    total = await Client.countDocuments(clientFilter);
+    clientDocs = await Client.find(clientFilter)
+      .sort({ lastName: 1, firstName: 1 })
+      .collation(SEARCH_COLLATION)
+      .skip((page - 1) * limit)
+      .limit(limit);
   }
+
+  const ids = clientDocs.map((c) => c._id);
+  const totalsMap = await aggregateAccountsForClients(ids);
+
+  // Build per-client summary with balance.
+  const pageItems: ClientWithTotals[] = clientDocs.map((c) => {
+    const totals = totalsMap.get(c._id.toString());
+    const debits = totals?.debits ?? 0;
+    const credits = totals?.credits ?? 0;
+    const balance = debits - credits;
+    return {
+      _id: c._id,
+      firstName: c.firstName,
+      lastName: c.lastName,
+      documentType: c.documentType,
+      documentNumber: c.documentNumber,
+      clientType: c.clientType,
+      active: c.active,
+      userId: c.userId ?? null,
+      totalDebitsMinor: debits,
+      totalCreditsMinor: credits,
+      balanceMinor: balance,
+      status: statusFromBalance(balance),
+      lastMovementAt: totals?.last ?? null,
+    };
+  });
 
   const items: AccountListItem[] = pageItems.map((c) => ({
     clientId: c._id.toString(),

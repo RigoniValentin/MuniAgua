@@ -30,7 +30,8 @@
     "smoke:mvp": "node node_modules/tsx/dist/cli.mjs scripts/smoke-mvp.ts",
     "smoke:standalone": "node node_modules/tsx/dist/cli.mjs scripts/smoke-standalone.ts",
     "smoke:prod": "node node_modules/tsx/dist/cli.mjs scripts/smoke-prod-server.ts",
-    "import:excel": "node node_modules/tsx/dist/cli.mjs scripts/import-excel.ts"
+    "import:excel": "node node_modules/tsx/dist/cli.mjs scripts/import-excel.ts",
+    "import:saldos-cta-cte": "node node_modules/tsx/dist/cli.mjs scripts/import-saldos-cta-cte.ts"
   },
   "dependencies": {
     "@types/multer": "^1.4.12",

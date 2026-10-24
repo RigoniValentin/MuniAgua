@@ -876,8 +876,42 @@ describe('Account ledger — listing', () => {
     expect(settled.body.data.pagination.total).toBe(1);
   });
 
-  it('paginates the list respecting limit/page', async () => {
+  it('filters by balanceStatus BEFORE paginating (regression)', async () => {
     await seedUser('ADMIN', 'admin@buchardo.gob.ar');
+    const token = await loginAs('admin@buchardo.gob.ar');
+
+    // 30 SETTLED clients that sort BEFORE the debtor. The debtor must still
+    // show up on page 1 even though it doesn't belong to the first page of
+    // the unfiltered dataset (the balance filter has to be applied before
+    // slicing, not after).
+    for (let i = 0; i < 30; i += 1) {
+      await seedClient({ firstName: `Ana${i}`, lastName: `Aaaa${i}` });
+    }
+    const debtor = await seedClient({ firstName: 'Zeta', lastName: 'Zzzz' });
+
+    await request(app)
+      .post(`/api/accounts/${debtor._id.toString()}/adjustments`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(validAdjustmentBody({ amountMinor: 5_000_000 }));
+
+    const res = await request(app)
+      .get('/api/accounts?balanceStatus=DEBT&limit=20&page=1')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.data.pagination.total).toBe(1);
+    expect(res.body.data.items).toHaveLength(1);
+    expect(res.body.data.items[0].clientId).toBe(debtor._id.toString());
+    expect(res.body.data.items[0].balanceMinor).toBe(5_000_000);
+
+    // The same holds for the other statuses: SETTLED must list the 30.
+    const settled = await request(app)
+      .get('/api/accounts?balanceStatus=SETTLED&limit=20&page=1')
+      .set('Authorization', `Bearer ${token}`);
+    expect(settled.body.data.pagination.total).toBe(30);
+    expect(settled.body.data.items).toHaveLength(20);
+  });
+
+  it('paginates the list respecting limit/page', async () => {    await seedUser('ADMIN', 'admin@buchardo.gob.ar');
     const token = await loginAs('admin@buchardo.gob.ar');
     for (let i = 0; i < 5; i++) {
       await seedClient({ firstName: `C${i}`, lastName: `Test${i}` });

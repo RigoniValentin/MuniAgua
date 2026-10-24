@@ -1063,6 +1063,104 @@ El script preserva productos y reglas de pricing (catálogo) y cualquier
 registro que no esté marcado como demo (por ejemplo, órdenes o pagos
 creados por usuarios reales durante operación normal).
 
+## Migración de saldos de cta cte y tipo de cliente
+
+El municipio entrega un CSV con el saldo de cuenta corriente y el tipo de
+cliente del padrón (`Nombre;TipoCliente;Saldo CTA CTE`). El script
+`npm run import:saldos-cta-cte` aplica esa información:
+
+- el `TipoCliente` al `Client.clientType`;
+- el `Saldo CTA CTE` como un movimiento `OPENING_BALANCE` (DEBIT) en el
+  ledger `AccountMovement`.
+
+> El saldo **nunca** se escribe como campo en `Client`: la cuenta corriente
+> se deriva siempre del ledger (ver [Cálculo del saldo](#cálculo-del-saldo)).
+
+### Formato esperado del CSV
+
+- Delimitador `;`, codificación UTF-8 (con o sin BOM), saltos `LF` o `CRLF`.
+- `Nombre` en formato `Apellido,Nombre` (mismo criterio que el padrón
+  original: `"Toledo,Juana"` → apellido `Toledo`, nombre `Juana`).
+- `Saldo CTA CTE` en **pesos** (unidades mayores). El backend trabaja en
+  minor units (×100), la conversión la hace el script.
+- `TipoCliente` acepta los valores del padrón y los normaliza:
+
+  | Valor en el CSV   | `ClientType`    |
+  | ----------------- | --------------- |
+  | `LOCAL`           | `LOCAL`         |
+  | `JUBILADO`        | `JUBILADO`      |
+  | `JIBILADO`        | `JUBILADO`      |
+  | `AYUDA SOCIAL`    | `AYUDA_SOCIAL`  |
+  | `NOLOCAL`         | `NO_LOCAL`      |
+
+  Cualquier otro valor rechaza la fila sin tocar el cliente.
+
+### Matching de clientes
+
+El CSV no trae DNI, así que el matching es por nombre. El padrón se importó
+con el apellido en `firstName` (ver `scripts/import-excel.ts` → `splitName`),
+por eso el script busca en las dos orientaciones (`firstName|lastName` y
+`lastName|firstName`) y funciona antes y después de corregir los nombres.
+
+Una fila se rechaza (sin escribir nada) si el nombre no existe, si es
+ambiguo (varios candidatos) o si dos filas del CSV apuntan al mismo cliente.
+
+### Uso
+
+```bash
+# Simulación: no escribe en la base, sólo genera el reporte de reconciliación.
+npm run import:saldos-cta-cte -- ../SaldosCtaCte.csv --dry-run
+
+# Aplicación real (requiere --confirm explícito).
+npm run import:saldos-cta-cte -- ../SaldosCtaCte.csv --confirm
+
+# Sólo el tipo de cliente, o sólo los saldos.
+npm run import:saldos-cta-cte -- ../SaldosCtaCte.csv --confirm --only-types
+npm run import:saldos-cta-cte -- ../SaldosCtaCte.csv --confirm --only-balances
+
+# Revertir una migración aplicada.
+npm run import:saldos-cta-cte -- --rollback storage/imports/snapshot-saldos-cta-cte-<ts>.json --confirm
+```
+
+Flags: `--dry-run`, `--confirm`, `--only-types`, `--only-balances`,
+`--skip-test-clients`, `--out-dir <dir>` (default `storage/imports`).
+
+### Idempotencia
+
+Cada movimiento usa `idempotencyKey = import:saldos-cta-cte:<slug>`. Re-correr
+el script con el mismo CSV es un no-op: `postMovement` devuelve el movimiento
+existente y la fila queda marcada `YA_APLICADO` en el reporte. Si el saldo del
+CSV cambió, la fila se reporta como `CONFLICTO` — el script **nunca** duplica
+el efecto financiero ni lo resuelve por su cuenta.
+
+### Reporte de reconciliación y rollback
+
+Cada corrida escribe en `storage/imports/` (ignorado por git, porque
+contiene datos personales):
+
+- `reconciliacion-saldos-cta-cte-<ts>.csv` — una fila por línea del CSV con
+  el tipo aplicado, la orientación del matching, el saldo previo, el saldo
+  esperado, el saldo final y el estado (`OK`, `YA_APLICADO`, `SIN_SALDO`,
+  `CONFLICTO`, `NO_ENCONTRADO`, `AMBIGUO`, `TIPO_INVALIDO`, …).
+- `snapshot-saldos-cta-cte-<ts>.json` — el `clientType` anterior y el
+  `movementId` creado, para revertir con `--rollback`.
+
+El rollback **revierte** los movimientos (crea un `REVERSAL`, nunca borra) y
+restaura los tipos de cliente.
+
+### Notas de despliegue
+
+- `scripts/` no se compila (`tsconfig.build.json` sólo incluye `src/`): el
+  script se corre desde el código fuente con `tsx`, que es una
+  `devDependency`. Si el servidor se instaló con `--omit=dev`, hay que
+  correr `npm install --include=dev` antes de migrar.
+- Correr siempre desde la raíz de `MuniBack/` (dotenv lee `.env` del CWD).
+- `MONGO_TRANSACTION_MODE` debe quedar en `auto`: contra un MongoDB
+  standalone (sin Replica Set) el script usa el camino compensado, que es
+  seguro por el `idempotencyKey` único del ledger.
+- El CSV contiene datos personales: **no va al repositorio** (que es
+  público). Se transfiere por `scp` a `/tmp` y se borra después.
+
 ## Licencia
 
 Privado.

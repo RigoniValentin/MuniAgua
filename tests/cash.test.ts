@@ -108,7 +108,7 @@ async function seedProduct(opts: {
 
 describe('Cash — cta cte vs cash ledger are independent', () => {
   it('CASH order: cta cte balance unaffected, cash ledger receives the collection', async () => {
-    const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const _driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({ documentNumber: 'CASH-001' });
     const refill = await seedProduct({ basePriceMinor: 2_000_000 });
     const driverToken = await loginAs('driver@buchardo.gob.ar');
@@ -137,7 +137,7 @@ describe('Cash — cta cte vs cash ledger are independent', () => {
 
   it('citizen sees /cash/me/movements for own cash entries only', async () => {
     const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
-    const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
+    const _driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({
       userId: citizen._id,
       documentNumber: 'CASH-CIT-001',
