@@ -14,6 +14,10 @@ import {
   downloadMyHistoryXlsxController,
   getMyHistoryController,
 } from '../driver-history/driver-history.controller.js';
+import {
+  createDriverClientController,
+  updateDriverClientController,
+} from '../clients/clients.controller.js';
 
 const router = Router();
 router.use(authenticate);
@@ -60,6 +64,23 @@ router.post(
   '/me/direct-order',
   requirePermission(PERMISSIONS.DELIVERY_CREATE),
   createDirectOrderController,
+);
+
+// Client management from the driver surface: the repartidor registers a
+// neighbour that is not in the padrón yet, or fixes a wrong address/phone
+// while standing at the door.
+// IMPORTANT: these use their own `delivery.clients.*` permissions on purpose —
+// the driver never inherits `clients.create` / `clients.update`, so the bulk
+// editor and the citizen-access linking stay out of reach.
+router.post(
+  '/me/clients',
+  requirePermission(PERMISSIONS.DELIVERY_CLIENTS_CREATE),
+  createDriverClientController,
+);
+router.patch(
+  '/me/clients/:id',
+  requirePermission(PERMISSIONS.DELIVERY_CLIENTS_UPDATE),
+  updateDriverClientController,
 );
 
 export default router;

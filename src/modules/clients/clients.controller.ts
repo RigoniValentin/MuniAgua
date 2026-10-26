@@ -89,6 +89,39 @@ export const bulkUpdateClientsController = asyncHandler(
 );
 
 // ============================================================================
+// Repartidor endpoints — create/update clients from the driver surface.
+// Same validation and same service layer as the staff endpoints (paridad
+// total), but gated behind the `delivery.clients.*` permissions so a driver
+// never inherits `clients.create` / `clients.update` (and with them the bulk
+// editor or the citizen-access linking).
+// ============================================================================
+
+export const createDriverClientController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const data = createClientSchema.parse(req.body);
+    const createdBy = req.user?.id ?? null;
+    const client = await createClient({ ...data, createdBy });
+    res.status(201).json(ok({ client: toClientDto(client) }));
+  },
+);
+
+export const updateDriverClientController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!id) {
+      throw new ValidationError('Identificador requerido');
+    }
+    if (!Types.ObjectId.isValid(id)) {
+      throw new ValidationError('Identificador de cliente inválido');
+    }
+    const data = updateClientSchema.parse(req.body);
+    const updatedBy = req.user?.id ?? null;
+    const client = await updateClient(id, { ...data, updatedBy });
+    res.json(ok({ client: toClientDto(client) }));
+  },
+);
+
+// ============================================================================
 // Citizen self endpoints — registered before /:id so Express never maps "me"
 // to an ObjectId.
 // ============================================================================

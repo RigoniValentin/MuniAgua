@@ -234,6 +234,8 @@ src/
 | POST   | `/api/clients/:clientId/citizen-access`  | Sí (clients.linkUser) | Vincula un User CIUDADANO al Client |
 | DELETE | `/api/clients/:clientId/citizen-access`  | Sí (clients.linkUser) | Desvincula (NO elimina Client/User/ledger) |
 | POST   | `/api/pricing/me/quote`       | Sí (pricing.quote) | Cotiza para el Client vinculado (sin enviar clientId) |
+| POST   | `/api/delivery/me/clients`    | Sí (delivery.clients.create) | Crea cliente desde la superficie del repartidor |
+| PATCH  | `/api/delivery/me/clients/:id`| Sí (delivery.clients.update) | Actualiza cliente desde la superficie del repartidor |
 
 \* Las rutas `/refresh` y `/logout` usan cookie HttpOnly, no Authorization header.
 
@@ -310,6 +312,12 @@ Respuesta:
 | `clients.update` |     ✓       |   ✓   |    ✓     |     —      |     —     |
 
 `CIUDADANO` no accede al listado general; las operaciones del ciudadano sobre su propio `Client` se implementarán en una fase posterior.
+
+El `REPARTIDOR` **no** recibe `clients.create` ni `clients.update`. Para
+gestionar clientes desde su propia aplicación usa los permisos
+`delivery.clients.create` / `delivery.clients.update` sobre
+`/api/delivery/me/clients` (ver
+[Gestión de clientes desde el repartidor](#gestión-de-clientes-desde-el-repartidor)).
 
 ## Seed inicial
 
@@ -968,6 +976,32 @@ Al crear un pedido el backend **recalcula** el precio con el `Pricing Engine` y 
 | POST   | `/api/delivery/me/orders/:id/start`   | `delivery.update` |
 | POST   | `/api/delivery/me/orders/:id/deliver` | `delivery.update` |
 | POST   | `/api/delivery/me/direct-order`  | `delivery.create` |
+| POST   | `/api/delivery/me/clients`        | `delivery.clients.create` |
+| PATCH  | `/api/delivery/me/clients/:id`    | `delivery.clients.update` |
+
+### Gestión de clientes desde el repartidor
+
+El repartidor puede **crear y modificar clientes** — por ejemplo, registrar a un
+vecino que todavía no está en el padrón o corregir una dirección/teléfono
+mientras está en la puerta.
+
+- Usa **paridad total con el módulo `clients`**: el mismo conjunto de campos
+  (incluidos documento, tipo de cliente y estado activo/inactivo), las mismas
+  validaciones Zod y el mismo service layer (`createClient` / `updateClient`).
+- Los permisos son **propios** (`delivery.clients.create` /
+  `delivery.clients.update`) y NO se heredan de `clients.create` /
+  `clients.update`. Esto deja fuera de alcance del repartidor el editor masivo
+  (`PATCH /api/clients/bulk`) y el linkeo de cuentas ciudadanas
+  (`/api/clients/:id/citizen-access`), que siguen siendo exclusivos de
+  administración.
+- `createdBy` / `updatedBy` quedan estampados con el `_id` del repartidor, de
+  modo que el padrón queda auditado.
+- El repartidor conserva `clients.read`: puede listar y buscar en el padrón
+  completo (`GET /api/clients`).
+
+> **Re-login necesario.** Los permisos viajan embebidos en el access token. Un
+> repartidor con una sesión abierta antes de este cambio no obtiene los
+> permisos nuevos hasta que vuelve a iniciar sesión.
 
 ### Operadores reales (producción)
 
