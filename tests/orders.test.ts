@@ -1252,13 +1252,13 @@ describe('Repartidor — filtro por zona', () => {
     }
   });
 
-  it('createDirectOrder bloquea con ZONE_NOT_DELIVERING_TODAY si la zona del cliente no reparte hoy', async () => {
-    await seedUser('REPARTIDOR', 'block-driver@buchardo.gob.ar');
+  it('createDirectOrder no bloquea por zona: registra la entrega de un cliente de otra zona', async () => {
+    const driver = await seedUser('REPARTIDOR', 'anyzone-driver@buchardo.gob.ar');
     const refill = await seedProduct({
-      code: 'BREFILL',
+      code: 'ZREFILL3',
       basePriceMinor: 1_000_000,
     });
-    const driverToken = await loginDriver('block-driver@buchardo.gob.ar');
+    const driverToken = await loginDriver('anyzone-driver@buchardo.gob.ar');
 
     const today = await todayZones();
     const offZone: 'ZONA 1' | 'ZONA 2' =
@@ -1279,17 +1279,20 @@ describe('Repartidor — filtro por zona', () => {
         items: [{ productId: refill._id.toString(), quantity: 1 }],
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('VALIDATION_ERROR');
-    expect(res.body.error.details?.code).toBe('ZONE_NOT_DELIVERING_TODAY');
+    expect(res.status).toBe(201);
+    expect(res.body.data.order.zona).toBe(offZone);
+    expect(res.body.data.order.status).toBe('DELIVERED');
+    expect(res.body.data.order.assignedTo).toBe(driver._id.toString());
 
-    // No order or movement should have leaked.
-    const leaked = await Order.find({ clientId: offZoneClient._id }).lean();
-    expect(leaked).toHaveLength(0);
+    const persisted = await Order.findById(res.body.data.order.id).lean();
+    expect(persisted?.zonaSnapshot).toBe(offZone);
+
+    // El cargo a cuenta corriente se genera igual, más allá de la zona.
     const movements = await AccountMovement.find({
       clientId: offZoneClient._id,
     }).lean();
-    expect(movements).toHaveLength(0);
+    expect(movements).toHaveLength(1);
+    expect(movements[0].direction).toBe('DEBIT');
   });
 
   it('createDirectOrder permite la zona del cliente cuando sí reparte hoy', async () => {

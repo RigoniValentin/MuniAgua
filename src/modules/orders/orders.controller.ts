@@ -21,9 +21,9 @@
 import type { Request } from 'express';
 import { asyncHandler } from '../../middlewares/error.js';
 import { ok } from '../../shared/api-response.js';
-import { NotFoundError, ValidationError } from '../../shared/errors.js';
+import { NotFoundError } from '../../shared/errors.js';
 import { getAppToday } from '../../shared/app-date.js';
-import { getClientOrThrow, getSelfClientOrThrow } from '../clients/clients.service.js';
+import { getSelfClientOrThrow } from '../clients/clients.service.js';
 import {
   cancelOrder,
   claimOrder,
@@ -49,10 +49,6 @@ import {
 } from './orders.validation.js';
 import { ORDER_STATUSES, type OrderOrigin, type OrderStatus } from './orders.types.js';
 import type { ClientType } from '../clients/clients.types.js';
-import {
-  isKnownZone,
-  zoneDeliversOn,
-} from '../delivery-zones/delivery-zones.helpers.js';
 
 function requireUserId(req: Request): string {
   const id = req.user?.id;
@@ -273,28 +269,6 @@ export const createDirectOrderController = asyncHandler(async (req, res) => {
   // Drivers can only create direct orders for themselves.
   // If a staff admin creates one for another driver, they'd need a separate
   // field — out of scope for MVP. Always assign to req.user for drivers.
-
-  // Block the creation when the client's known zone does not deliver today.
-  // Orders with no zone still slip through (padrón incomplete — surface,
-  // don't block citizens' deliveries).
-  const today = getAppToday();
-  const clientForZone = await getClientOrThrow(payload.clientId);
-  if (isKnownZone(clientForZone.zona)) {
-    const zone = clientForZone.zona as 'ZONA 1' | 'ZONA 2';
-    if (!zoneDeliversOn(zone, today.weekday)) {
-      throw new ValidationError(
-        `Hoy reparte ${today.zones.join(' y ') || 'ninguna zona'} (${today.weekdayLabel}). ` +
-          `Este cliente pertenece a ${zone}. Ajustá la zona del padrón o elegí otro cliente.`,
-        {
-          code: 'ZONE_NOT_DELIVERING_TODAY',
-          zone,
-          weekday: today.weekday,
-          weekdayLabel: today.weekdayLabel,
-          zonesToday: today.zones,
-        },
-      );
-    }
-  }
 
   // A direct-order is registered at the client's door: the repartidor went
   // there because the client asked for a sale, and the goods change hands in
