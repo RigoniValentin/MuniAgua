@@ -694,6 +694,8 @@ describe('Repartidor — entregas', () => {
   it('direct-order con CASH → nace DELIVERED (sin paso extra) y genera 1 CashMovement', async () => {
     const driver = await seedUser('REPARTIDOR', 'driver@buchardo.gob.ar');
     const client = await seedClient({ documentNumber: '777' });
+    client.address.number = null;
+    await client.save();
     const refill = await seedProduct({ basePriceMinor: 1_000_000 });
     const container = await seedProduct({
       basePriceMinor: 1_500_000,
@@ -714,6 +716,7 @@ describe('Repartidor — entregas', () => {
       });
     expect(res.status).toBe(201);
     expect(res.body.data.order.paymentMethod).toBe('CASH');
+    expect(res.body.data.order.deliveryAddress.number).toBeNull();
     expect(res.body.data.order.totalFinalMinor).toBe(2_500_000);
     expect(res.body.data.order.paidAt).toBeTruthy();
     expect(res.body.data.order.assignedTo).toBe(driver._id.toString());

@@ -154,7 +154,9 @@ const orderItemSchema = new Schema<OrderItem>(
 const orderDeliveryAddressSchema = new Schema<OrderDeliveryAddress>(
   {
     street: { type: String, required: true, trim: true, maxlength: 120 },
-    number: { type: String, required: true, trim: true, maxlength: 20 },
+    // Client addresses allow a missing street number; preserve that valid
+    // address in the order snapshot instead of rejecting the delivery.
+    number: { type: String, required: false, trim: true, maxlength: 20, default: null },
     floor: { type: String, trim: true, maxlength: 10, default: null },
     apartment: { type: String, trim: true, maxlength: 10, default: null },
     neighborhood: { type: String, trim: true, maxlength: 80, default: null },
