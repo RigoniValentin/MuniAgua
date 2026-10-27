@@ -3,6 +3,8 @@ import { authenticate } from '../../middlewares/authenticate.js';
 import { requirePermission } from '../../middlewares/authorize.js';
 import { PERMISSIONS } from '../users/users.types.js';
 import {
+  annulMyDeliveryController,
+  changeMyDeliveryPaymentMethodController,
   claimMyDeliveryController,
   createDirectOrderController,
   deliverMyOrderController,
@@ -59,6 +61,19 @@ router.post(
   '/me/orders/:id/deliver',
   requirePermission(PERMISSIONS.DELIVERY_UPDATE),
   deliverMyOrderController,
+);
+// Corrections on a delivery the repartidor already closed: annul it
+// (reversing the settlement) or fix the way it was paid. Both only work
+// on the repartidor's own deliveries — the check lives in the service.
+router.post(
+  '/me/orders/:id/cancel',
+  requirePermission(PERMISSIONS.DELIVERY_UPDATE),
+  annulMyDeliveryController,
+);
+router.post(
+  '/me/orders/:id/payment-method',
+  requirePermission(PERMISSIONS.DELIVERY_UPDATE),
+  changeMyDeliveryPaymentMethodController,
 );
 router.post(
   '/me/direct-order',

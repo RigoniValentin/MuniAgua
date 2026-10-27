@@ -74,19 +74,17 @@ export interface OrderDocument extends Document {
   customerNote?: string | null;
 
   /**
-   * Ledger entry on the client's cuenta corriente.
-   *   - Set for ACCOUNT orders (DEBIT ORDER_CHARGE) and for ACCOUNT orders
-   *     that get cancelled (REVERSAL).
-   *   - Null for orders created directly as CASH (no DEBIT ever happened).
-   *   - When an ACCOUNT order is delivered as CASH, this field is moved
-   *     to point at the REVERSAL movement, so the cta cte net effect
-   *     for the order is 0.
+   * ACTIVE ledger entry on the client's cuenta corriente.
+   *   - Set while the order has a live DEBIT (ORDER_CHARGE).
+   *   - Null when the order was born as CASH, or when the DEBIT was already
+   *     reversed (payment-method correction or annulment).
    */
   accountMovementId?: Types.ObjectId | null;
 
   /**
-   * Cash-collection entry on the CASH ledger (separate from the
-   * cta cte). Set for CASH orders. Null for ACCOUNT orders.
+   * ACTIVE cash-collection entry on the CASH ledger (separate from the
+   * cta cte). Set while the order has a live CASH_COLLECTION. Null for
+   * ACCOUNT orders and once the collection was reversed.
    */
   cashMovementId?: Types.ObjectId | null;
 
@@ -114,6 +112,13 @@ export interface OrderDocument extends Document {
   cancelledAt?: Date | null;
   cancellationReason?: string | null;
   cancellationMovementId?: Types.ObjectId | null;
+
+  /**
+   * When the payment method was corrected after the delivery was closed.
+   * Null when the order was created with the method it settled with.
+   */
+  paymentMethodChangedAt?: Date | null;
+  paymentMethodChangeReason?: string | null;
 
   createdBy: Types.ObjectId;
   createdAt: Date;
@@ -226,6 +231,13 @@ const orderSchema = new Schema<OrderDocument, OrderModel>(
     cancellationMovementId: {
       type: Schema.Types.ObjectId,
       ref: 'AccountMovement',
+      default: null,
+    },
+    paymentMethodChangedAt: { type: Date, default: null },
+    paymentMethodChangeReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
       default: null,
     },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },

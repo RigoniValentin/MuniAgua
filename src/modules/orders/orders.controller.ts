@@ -25,7 +25,9 @@ import { NotFoundError } from '../../shared/errors.js';
 import { getAppToday } from '../../shared/app-date.js';
 import { getSelfClientOrThrow } from '../clients/clients.service.js';
 import {
+  annulDeliveredOrder,
   cancelOrder,
+  changeOrderPaymentMethod,
   claimOrder,
   createOrder,
   getOrderByIdOrThrow,
@@ -39,7 +41,9 @@ import {
 import type { OrderDocument } from './orders.model.js';
 import {
   adminOrdersQuerySchema,
+  annulDeliverySchema,
   cancelOrderSchema,
+  changePaymentMethodSchema,
   createMyOrderSchema,
   createStaffOrderSchema,
   deliverOrderSchema,
@@ -185,6 +189,8 @@ export const cancelOrderController = asyncHandler(async (req, res) => {
     reason: payload.reason,
     requireReason: true,
     bypassOwnershipCheck: true,
+    // The administration can also annul a delivery that was already made.
+    allowDelivered: true,
   });
   const dto = await formatForAdmin(order);
   res.json(ok({ order: dto }));
@@ -262,6 +268,43 @@ export const deliverMyOrderController = asyncHandler(async (req, res) => {
   const dto = await formatForDriver(order);
   res.json(ok({ order: dto }));
 });
+
+/**
+ * Anulment of a delivery the repartidor already made: the order goes back
+ * to CANCELLED and the settlement (cta cte DEBIT and/or cash collection) is
+ * reversed. The reason is mandatory — it stays in the audit trail.
+ */
+export const annulMyDeliveryController = asyncHandler(async (req, res) => {
+  const userId = requireUserId(req);
+  const payload = annulDeliverySchema.parse(req.body ?? {});
+  const order = await annulDeliveredOrder({
+    orderId: req.params.id!,
+    driverUserId: userId,
+    reason: payload.reason,
+  });
+  const dto = await formatForDriver(order);
+  res.json(ok({ order: dto }));
+});
+
+/**
+ * Correction of the payment method of a delivery the repartidor already
+ * made (e.g. it was charged on the cuenta corriente but the client paid in
+ * cash). The original movement is reversed and the new one is posted.
+ */
+export const changeMyDeliveryPaymentMethodController = asyncHandler(
+  async (req, res) => {
+    const userId = requireUserId(req);
+    const payload = changePaymentMethodSchema.parse(req.body ?? {});
+    const order = await changeOrderPaymentMethod({
+      orderId: req.params.id!,
+      driverUserId: userId,
+      paymentMethod: payload.paymentMethod,
+      reason: payload.reason ?? null,
+    });
+    const dto = await formatForDriver(order);
+    res.json(ok({ order: dto }));
+  },
+);
 
 export const createDirectOrderController = asyncHandler(async (req, res) => {
   const userId = requireUserId(req);

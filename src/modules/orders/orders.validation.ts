@@ -118,6 +118,51 @@ export const staffCancelOrderSchema = z
 
 export type StaffCancelOrderPayload = z.infer<typeof staffCancelOrderSchema>;
 
+/**
+ * Driver annulment of an already delivered order — reason is required.
+ */
+export const annulDeliverySchema = z
+  .object({
+    reason: z
+      .string()
+      .trim()
+      .min(1, 'El motivo de anulación es obligatorio')
+      .max(
+        MAX_CANCELLATION_REASON_LENGTH,
+        `Máximo ${MAX_CANCELLATION_REASON_LENGTH} caracteres`,
+      ),
+  })
+  .strict();
+
+export type AnnulDeliveryPayload = z.infer<typeof annulDeliverySchema>;
+
+/**
+ * Driver correction of the payment method after the delivery was closed.
+ * The reason is optional but recommended (it ends up in the audit trail).
+ */
+export const changePaymentMethodSchema = z
+  .object({
+    paymentMethod: z.enum(
+      ALL_ORDER_PAYMENT_METHODS as unknown as [
+        OrderPaymentMethod,
+        ...OrderPaymentMethod[],
+      ],
+    ),
+    reason: z
+      .string()
+      .trim()
+      .max(
+        MAX_CANCELLATION_REASON_LENGTH,
+        `Máximo ${MAX_CANCELLATION_REASON_LENGTH} caracteres`,
+      )
+      .optional(),
+  })
+  .strict();
+
+export type ChangePaymentMethodPayload = z.infer<
+  typeof changePaymentMethodSchema
+>;
+
 // ---------- Query schemas ----------
 
 const ORDER_STATUS_TUPLE = ALL_ORDER_STATUSES as unknown as [

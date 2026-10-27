@@ -276,8 +276,32 @@ export async function buildDriverHistory(
     };
   };
 
+  /** Cancellation / annulment event of an order (shared by both paths). */
+  const pushCancellationEntry = (order: OrderProjection) => {
+    if (!inRange(order.cancelledAt)) return;
+    const entry = baseEntry(order, 'ORDER_CANCELLED', order.cancelledAt);
+    if (order.cancellationMovementId) {
+      entry.accountReversedMinor =
+        reversalAmountById.get(order.cancellationMovementId.toString()) ?? 0;
+    }
+    entry.detail =
+      order.cancellationReason?.trim() || 'Pedido cancelado por la administración';
+    entries.push(entry);
+
+    summary.ordersCancelled += 1;
+    summary.accountReversedMinor += entry.accountReversedMinor;
+  };
+
   for (const order of orders) {
     const direct = isDirectOrder(order);
+    /**
+     * An annulled delivery (the repartidor undid it after making it) is
+     * still part of the timeline — it happened — but it no longer counts
+     * as delivered: neither the units, nor the cash collected, nor the
+     * amount charged on the cuenta corriente.
+     */
+    const annulled =
+      order.status === ORDER_STATUSES.CANCELLED && Boolean(order.cancelledAt);
 
     if (direct && inRange(order.deliveredAt)) {
       const entry = baseEntry(order, 'DIRECT_ORDER', order.deliveredAt);
@@ -295,13 +319,18 @@ export async function buildDriverHistory(
       }
       entries.push(entry);
 
-      summary.directOrders += 1;
-      summary.ordersDelivered += 1;
-      summary.unitsDelivered += units;
-      summary.totalDeliveredMinor += order.totalFinalMinor;
-      summary.cashCollectedMinor += entry.cashCollectedMinor;
-      summary.accountChargedMinor += entry.accountChargedMinor;
+      if (!annulled) {
+        summary.directOrders += 1;
+        summary.ordersDelivered += 1;
+        summary.unitsDelivered += units;
+        summary.totalDeliveredMinor += order.totalFinalMinor;
+        summary.cashCollectedMinor += entry.cashCollectedMinor;
+        summary.accountChargedMinor += entry.accountChargedMinor;
+      }
       clientsWithActivity.add(order.clientId.toString());
+      if (annulled) {
+        pushCancellationEntry(order);
+      }
       continue;
     }
 
@@ -344,27 +373,19 @@ export async function buildDriverHistory(
       }
       entries.push(entry);
 
-      summary.ordersDelivered += 1;
-      summary.unitsDelivered += units;
-      summary.totalDeliveredMinor += order.totalFinalMinor;
-      summary.cashCollectedMinor += entry.cashCollectedMinor;
-      summary.accountChargedMinor += entry.accountChargedMinor;
-      summary.accountReversedMinor += entry.accountReversedMinor;
+      if (!annulled) {
+        summary.ordersDelivered += 1;
+        summary.unitsDelivered += units;
+        summary.totalDeliveredMinor += order.totalFinalMinor;
+        summary.cashCollectedMinor += entry.cashCollectedMinor;
+        summary.accountChargedMinor += entry.accountChargedMinor;
+        summary.accountReversedMinor += entry.accountReversedMinor;
+      }
       clientsWithActivity.add(order.clientId.toString());
     }
 
     if (inRange(order.cancelledAt)) {
-      const entry = baseEntry(order, 'ORDER_CANCELLED', order.cancelledAt);
-      if (order.cancellationMovementId) {
-        entry.accountReversedMinor =
-          reversalAmountById.get(order.cancellationMovementId.toString()) ?? 0;
-      }
-      entry.detail =
-        order.cancellationReason?.trim() || 'Pedido cancelado por la administración';
-      entries.push(entry);
-
-      summary.ordersCancelled += 1;
-      summary.accountReversedMinor += entry.accountReversedMinor;
+      pushCancellationEntry(order);
     }
   }
 

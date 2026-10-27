@@ -20,7 +20,7 @@ export const listCashMovementsQuerySchema = z.object({
   clientId: objectIdSchema.optional(),
   driverId: objectIdSchema.optional(),
   orderId: objectIdSchema.optional(),
-  movementType: z.enum(['CASH_COLLECTION']).optional(),
+  movementType: z.enum(['CASH_COLLECTION', 'CASH_REVERSAL']).optional(),
   sourceType: z.enum(['ORDER', 'MANUAL']).optional(),
   dateFrom: z.coerce.date().optional(),
   dateTo: z.coerce.date().optional(),

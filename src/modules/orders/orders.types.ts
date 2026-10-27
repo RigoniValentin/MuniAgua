@@ -10,13 +10,16 @@
  * Lifecycle (MVP — driver-centric):
  *   CONFIRMED → PENDING → ASSIGNED → OUT_FOR_DELIVERY → DELIVERED
  *   CONFIRMED / PENDING / ASSIGNED → CANCELLED
+ *   DELIVERED → CANCELLED (anulación de una entrega ya realizada)
  *
  *   CONFIRMED  - Created, waiting for the day that matches its zona.
  *   PENDING    - Zona delivers today; visible to drivers in the pool.
  *                A driver "claims" it → ASSIGNED.
  *   ASSIGNED   - A driver claimed it; ready to start delivery.
  *   OUT_FOR_DELIVERY - In progress.
- *   DELIVERED  - Terminal.
+ *   DELIVERED  - Entregada. El repartidor que la hizo puede anularla o
+ *                corregir la forma de pago (queda CANCELLED o se reasienta
+ *                el cobro en el ledger).
  *   CANCELLED  - Terminal (reverses the DEBIT when applicable).
  *
  * A staff direct-order (delivery.create) short-circuits the whole chain: the
@@ -50,15 +53,17 @@ export const ALL_ORDER_ORIGINS: OrderOrigin[] = Object.values(ORDER_ORIGINS);
 
 /**
  * State machine transitions allowed in the MVP.
- * DELIVERED and CANCELLED are terminal.
- * OUT_FOR_DELIVERY → CANCELLED is not allowed for MVP.
+ * CANCELLED is terminal.
+ * DELIVERED → CANCELLED is the annulment path: the repartidor (or the
+ * administration) reverses the settlement of an already completed delivery.
+ * OUT_FOR_DELIVERY → CANCELLED is not allowed in MVP.
  */
 export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   CONFIRMED: [ORDER_STATUSES.PENDING, ORDER_STATUSES.CANCELLED],
   PENDING: [ORDER_STATUSES.ASSIGNED, ORDER_STATUSES.CANCELLED],
   ASSIGNED: [ORDER_STATUSES.OUT_FOR_DELIVERY, ORDER_STATUSES.CANCELLED],
   OUT_FOR_DELIVERY: [ORDER_STATUSES.DELIVERED],
-  DELIVERED: [],
+  DELIVERED: [ORDER_STATUSES.CANCELLED],
   CANCELLED: [],
 };
 

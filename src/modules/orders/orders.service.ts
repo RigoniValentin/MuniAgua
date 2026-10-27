@@ -39,6 +39,7 @@ import {
   postMovement,
   reverseMovement,
 } from '../accounts/accounts.service.js';
+import { AccountMovement } from '../accounts/account-movements.model.js';
 import {
   canTransition,
   ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX,
@@ -46,6 +47,7 @@ import {
   ORDER_DELIVERY_CHARGE_IDEMPOTENCY_PREFIX,
   ORDER_DELIVERY_CHARGE_IDEMPOTENCY_SUFFIX,
   ORDER_PAYMENT_METHODS,
+  ORDER_PAYMENT_METHOD_LABEL,
   ORDER_STATUSES,
   type OrderOrigin,
   type OrderPaymentMethod,
@@ -70,6 +72,7 @@ import {
   postCashCollection,
   reverseCashMovement,
 } from '../cash/cash.service.js';
+import { CashMovement } from '../cash/cash-movements.model.js';
 
 // ============================================================================
 // Public DTOs
@@ -158,6 +161,14 @@ startedDeliveryAt?: Date | null;
 
   cancelledAt?: Date | null;
   cancellationReason?: string | null;
+
+  /**
+   * Set when the payment method was corrected after the delivery was
+   * closed (e.g. the client paid in cash but it was charged on the
+   * cuenta corriente).
+   */
+  paymentMethodChangedAt?: Date | null;
+  paymentMethodChangeReason?: string | null;
 
   createdAt: Date;
   updatedAt: Date;
@@ -262,6 +273,8 @@ export function toOrderDto(
     paidAt: doc.paidAt ?? null,
     cancelledAt: doc.cancelledAt ?? null,
     cancellationReason: doc.cancellationReason ?? null,
+    paymentMethodChangedAt: doc.paymentMethodChangedAt ?? null,
+    paymentMethodChangeReason: doc.paymentMethodChangeReason ?? null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -442,6 +455,67 @@ function idempotencyKeyForOrder(orderId: Types.ObjectId): string {
 
 function idempotencyKeyForCashCollection(orderId: Types.ObjectId): string {
   return `${ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX}:${orderId.toString()}:${ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX}`;
+}
+
+/**
+ * Idempotency keys for the corrections applied AFTER the delivery was
+ * closed (payment-method changes). The original keys
+ * (`ORDER:<id>:CHARGE` / `ORDER:<id>:CASH_COLLECTION`) are already taken by
+ * the first settlement, so every new attempt gets its own suffix. Without
+ * this, correcting the payment method back and forth would silently reuse
+ * the first movement instead of posting a new one.
+ */
+function chargeIdempotencyKeyForAttempt(
+  orderId: Types.ObjectId,
+  attempt: number,
+): string {
+  return `${ORDER_DELIVERY_CHARGE_IDEMPOTENCY_PREFIX}:${orderId.toString()}:${ORDER_DELIVERY_CHARGE_IDEMPOTENCY_SUFFIX}:${attempt}`;
+}
+
+function cashCollectionIdempotencyKeyForAttempt(
+  orderId: Types.ObjectId,
+  attempt: number,
+): string {
+  return `${ORDER_CASH_COLLECTION_IDEMPOTENCY_PREFIX}:${orderId.toString()}:${ORDER_CASH_COLLECTION_IDEMPOTENCY_SUFFIX}:${attempt}`;
+}
+
+/** Next attempt number for the cta cte charge of this order. */
+async function nextChargeAttempt(orderId: Types.ObjectId): Promise<number> {
+  const count = await AccountMovement.countDocuments({
+    sourceType: 'ORDER',
+    sourceId: orderId,
+    movementType: 'ORDER_CHARGE',
+  });
+  return count + 1;
+}
+
+/** Next attempt number for the cash collection of this order. */
+async function nextCashCollectionAttempt(
+  orderId: Types.ObjectId,
+): Promise<number> {
+  const count = await CashMovement.countDocuments({
+    orderId,
+    movementType: 'CASH_COLLECTION',
+  });
+  return count + 1;
+}
+
+/**
+ * Has this cta cte movement already been reversed? A DEBIT can only be
+ * reversed once (unique index on `reversesMovementId`), so the annulment
+ * and the payment-method correction must check before reversing — an order
+ * whose DEBIT was already reversed when it was flipped to CASH would fail
+ * with a raw duplicate-key error otherwise.
+ */
+async function isAccountMovementReversed(
+  movementId: Types.ObjectId,
+): Promise<boolean> {
+  const existing = await AccountMovement.findOne({
+    reversesMovementId: movementId,
+  })
+    .select('_id')
+    .lean();
+  return Boolean(existing);
 }
 
 // ============================================================================
@@ -865,6 +939,9 @@ export async function markDelivered(
             session,
           });
           order.cancellationMovementId = reversal._id;
+          // The DEBIT no longer stands: unlink it so a later annulment
+          // doesn't try to reverse it a second time.
+          order.accountMovementId = null;
         }
         if (order.totalFinalMinor > 0) {
           const cash = await postCashCollection({
@@ -914,6 +991,7 @@ export async function markDelivered(
               createdBy: input.driverUserId,
             });
             order.cancellationMovementId = reversal._id;
+            order.accountMovementId = null;
           }
           if (order.totalFinalMinor > 0) {
             const cash = await postCashCollection({
@@ -970,6 +1048,14 @@ export interface CancelOrderInput {
   bypassOwnershipCheck?: boolean;
   /** When provided, restrict ownership to this clientId (citizen cancel). */
   ownedByClientId?: string;
+  /** When provided, restrict ownership to the repartidor that made it. */
+  ownedByDriverId?: string;
+  /**
+   * Allow cancelling an already DELIVERED order (annulment). Only the
+   * repartidor that made the delivery and the administration may do it —
+   * a citizen never can.
+   */
+  allowDelivered?: boolean;
 }
 
 export async function cancelOrder(
@@ -993,6 +1079,17 @@ export async function cancelOrder(
     throw new NotFoundError('Pedido no encontrado');
   }
 
+  if (
+    !input.bypassOwnershipCheck &&
+    input.ownedByDriverId &&
+    (!order.assignedTo ||
+      order.assignedTo.toString() !== input.ownedByDriverId)
+  ) {
+    throw new ForbiddenError(
+      'La entrega no fue registrada por este repartidor',
+    );
+  }
+
   const trimmedReason = (input.reason ?? '').trim();
   if (input.requireReason && trimmedReason.length === 0) {
     throw new ValidationError('El motivo de cancelación es obligatorio');
@@ -1003,10 +1100,17 @@ export async function cancelOrder(
   //   PENDING   → CANCELLED  (citizen allowed, staff allowed)
   //   ASSIGNED  → CANCELLED  (staff only — driver already claimed it)
   //   OUT_FOR_DELIVERY → CANCELLED  NOT allowed in MVP
-  //   DELIVERED, CANCELLED terminal.
+  //   DELIVERED → CANCELLED  (annulment: repartidor that delivered it, or
+  //                            staff — never a citizen)
+  //   CANCELLED terminal.
   if (!canTransition(order.status, ORDER_STATUSES.CANCELLED)) {
     throw new ConflictError(
       `No se puede cancelar un pedido en estado ${order.status}`,
+    );
+  }
+  if (order.status === ORDER_STATUSES.DELIVERED && input.allowDelivered !== true) {
+    throw new ConflictError(
+      'No podés anular una entrega ya realizada. Contactá a la administración.',
     );
   }
   if (
@@ -1032,28 +1136,14 @@ export async function cancelOrder(
       order.cancelledAt = now;
       order.cancellationReason = trimmedReason.length > 0 ? trimmedReason : null;
 
-      if (order.accountMovementId) {
-        const reversal = await reverseMovement({
-          movementId: order.accountMovementId.toString(),
-          description: trimmedReason.length > 0
+      await reverseOrderSettlement(order, {
+        description:
+          trimmedReason.length > 0
             ? `Pedido cancelado: ${trimmedReason}`
             : 'Pedido cancelado',
-          createdBy: input.actorUserId,
-          session,
-        });
-        order.cancellationMovementId = reversal._id;
-      }
-      if (order.cashMovementId) {
-        await reverseCashMovement({
-          movementId: order.cashMovementId.toString(),
-          description: trimmedReason.length > 0
-            ? `Pedido cancelado: ${trimmedReason}`
-            : 'Pedido cancelado',
-          createdBy: input.actorUserId,
-          session,
-        });
-        order.cashMovementId = null;
-      }
+        createdBy: input.actorUserId,
+        session,
+      });
       await order.save({ session });
       return order;
     },
@@ -1065,6 +1155,7 @@ export async function cancelOrder(
       const previousCancellationMovementId =
         order.cancellationMovementId ?? null;
       const previousCashMovementId = order.cashMovementId ?? null;
+      const previousAccountMovementId = order.accountMovementId ?? null;
 
       const now = new Date();
       order.status = ORDER_STATUSES.CANCELLED;
@@ -1072,26 +1163,13 @@ export async function cancelOrder(
       order.cancellationReason = trimmedReason.length > 0 ? trimmedReason : null;
 
       try {
-        if (order.accountMovementId) {
-          const reversal = await reverseMovement({
-            movementId: order.accountMovementId.toString(),
-            description: trimmedReason.length > 0
+        await reverseOrderSettlement(order, {
+          description:
+            trimmedReason.length > 0
               ? `Pedido cancelado: ${trimmedReason}`
               : 'Pedido cancelado',
-            createdBy: input.actorUserId,
-          });
-          order.cancellationMovementId = reversal._id;
-        }
-        if (order.cashMovementId) {
-          await reverseCashMovement({
-            movementId: order.cashMovementId.toString(),
-            description: trimmedReason.length > 0
-              ? `Pedido cancelado: ${trimmedReason}`
-              : 'Pedido cancelado',
-            createdBy: input.actorUserId,
-          });
-          order.cashMovementId = null;
-        }
+          createdBy: input.actorUserId,
+        });
         await order.save();
         return order;
       } catch (err) {
@@ -1101,6 +1179,7 @@ export async function cancelOrder(
         order.cancellationReason = previousReason;
         order.cancellationMovementId = previousCancellationMovementId;
         order.cashMovementId = previousCashMovementId;
+        order.accountMovementId = previousAccountMovementId;
         try {
           await order.save();
         } catch {
@@ -1111,6 +1190,278 @@ export async function cancelOrder(
     },
   });
   return order;
+}
+
+/**
+ * Reverses the settlement of an order: the cta cte DEBIT (if it is still
+ * standing) and the cash collection (if any). Movements are unlinked from
+ * the order afterwards, so `accountMovementId` / `cashMovementId` always
+ * point at the ACTIVE settlement.
+ */
+async function reverseOrderSettlement(
+  order: OrderDocument,
+  opts: {
+    description: string;
+    createdBy: string;
+    session?: ClientSession;
+  },
+): Promise<void> {
+  if (order.accountMovementId) {
+    const alreadyReversed = await isAccountMovementReversed(
+      order.accountMovementId,
+    );
+    if (!alreadyReversed) {
+      const reversal = await reverseMovement({
+        movementId: order.accountMovementId.toString(),
+        description: opts.description,
+        createdBy: opts.createdBy,
+        session: opts.session,
+      });
+      order.cancellationMovementId = reversal._id;
+    }
+    order.accountMovementId = null;
+  }
+  if (order.cashMovementId) {
+    await reverseCashMovement({
+      movementId: order.cashMovementId.toString(),
+      description: opts.description,
+      createdBy: opts.createdBy,
+      session: opts.session,
+    });
+    order.cashMovementId = null;
+  }
+}
+
+// ============================================================================
+// Annulment of an already delivered order (driver self)
+// ============================================================================
+
+export interface AnnulDeliveredOrderInput {
+  orderId: string;
+  driverUserId: string;
+  reason: string;
+}
+
+/**
+ * Anulment of a delivery the repartidor already made: the order goes back
+ * to CANCELLED and its settlement is reversed (cta cte DEBIT and/or cash
+ * collection). Only the repartidor that made the delivery may annul it.
+ */
+export async function annulDeliveredOrder(
+  input: AnnulDeliveredOrderInput,
+): Promise<OrderDocument> {
+  if (!Types.ObjectId.isValid(input.orderId)) {
+    throw new ValidationError('Identificador de pedido inválido');
+  }
+  if (!Types.ObjectId.isValid(input.driverUserId)) {
+    throw new ValidationError('Identificador de repartidor inválido');
+  }
+  const order = await Order.findById(input.orderId);
+  if (!order) throw new NotFoundError('Pedido no encontrado');
+  if (
+    !order.assignedTo ||
+    order.assignedTo.toString() !== input.driverUserId
+  ) {
+    throw new ForbiddenError(
+      'La entrega no fue registrada por este repartidor',
+    );
+  }
+  if (order.status !== ORDER_STATUSES.DELIVERED) {
+    throw new ConflictError(
+      `No se puede anular una entrega en estado ${order.status}`,
+    );
+  }
+  return cancelOrder({
+    orderId: input.orderId,
+    actorUserId: input.driverUserId,
+    reason: input.reason,
+    requireReason: true,
+    ownedByDriverId: input.driverUserId,
+    allowDelivered: true,
+  });
+}
+
+// ============================================================================
+// Payment-method correction after the delivery was closed (driver self)
+// ============================================================================
+
+export interface ChangeOrderPaymentMethodInput {
+  orderId: string;
+  driverUserId: string;
+  paymentMethod: OrderPaymentMethod;
+  reason?: string | null;
+}
+
+/**
+ * Corrects the way a delivery was settled. Used when the driver charged
+ * the cuenta corriente but the client actually paid in cash (or the other
+ * way around): the original movement is reversed and the new one is posted,
+ * so the client's balance and the driver's cash match reality.
+ */
+export async function changeOrderPaymentMethod(
+  input: ChangeOrderPaymentMethodInput,
+): Promise<OrderDocument> {
+  if (!Types.ObjectId.isValid(input.orderId)) {
+    throw new ValidationError('Identificador de pedido inválido');
+  }
+  if (!Types.ObjectId.isValid(input.driverUserId)) {
+    throw new ValidationError('Identificador de repartidor inválido');
+  }
+  const order = await Order.findById(input.orderId);
+  if (!order) throw new NotFoundError('Pedido no encontrado');
+  if (
+    !order.assignedTo ||
+    order.assignedTo.toString() !== input.driverUserId
+  ) {
+    throw new ForbiddenError(
+      'La entrega no fue registrada por este repartidor',
+    );
+  }
+  if (order.status !== ORDER_STATUSES.DELIVERED) {
+    throw new ConflictError(
+      `Sólo se puede corregir la forma de pago de una entrega realizada (estado ${order.status})`,
+    );
+  }
+  if (input.paymentMethod === order.paymentMethod) {
+    throw new ValidationError(
+      `La entrega ya figura como ${ORDER_PAYMENT_METHOD_LABEL[input.paymentMethod]}`,
+    );
+  }
+
+  const reason = (input.reason ?? '').trim();
+  const now = new Date();
+
+  await runAtomicOperation({
+    label: 'orders.changeOrderPaymentMethod',
+    transactional: async (session) => {
+      await applyPaymentMethodCorrection(order, input.paymentMethod, {
+        driverUserId: input.driverUserId,
+        reason,
+        now,
+        session,
+      });
+      await order.save({ session });
+      return order;
+    },
+    fallback: async () => {
+      const previousPaymentMethod = order.paymentMethod;
+      const previousAccountMovementId = order.accountMovementId ?? null;
+      const previousCashMovementId = order.cashMovementId ?? null;
+      const previousCancellationMovementId =
+        order.cancellationMovementId ?? null;
+      const previousPaymentMethodChangedAt =
+        order.paymentMethodChangedAt ?? null;
+      const previousPaymentMethodChangeReason =
+        order.paymentMethodChangeReason ?? null;
+
+      try {
+        await applyPaymentMethodCorrection(order, input.paymentMethod, {
+          driverUserId: input.driverUserId,
+          reason,
+          now,
+        });
+        await order.save();
+        return order;
+      } catch (err) {
+        order.paymentMethod = previousPaymentMethod;
+        order.accountMovementId = previousAccountMovementId;
+        order.cashMovementId = previousCashMovementId;
+        order.cancellationMovementId = previousCancellationMovementId;
+        order.paymentMethodChangedAt = previousPaymentMethodChangedAt;
+        order.paymentMethodChangeReason = previousPaymentMethodChangeReason;
+        try {
+          await order.save();
+        } catch {
+          // best-effort compensation
+        }
+        throw err;
+      }
+    },
+  });
+
+  return order;
+}
+
+async function applyPaymentMethodCorrection(
+  order: OrderDocument,
+  target: OrderPaymentMethod,
+  opts: {
+    driverUserId: string;
+    reason: string;
+    now: Date;
+    session?: ClientSession;
+  },
+): Promise<void> {
+  if (target === ORDER_PAYMENT_METHODS.CASH) {
+    // Was charged on the cuenta corriente → reverse the DEBIT and register
+    // the cash the driver actually collected.
+    if (order.accountMovementId) {
+      const alreadyReversed = await isAccountMovementReversed(
+        order.accountMovementId,
+      );
+      if (!alreadyReversed) {
+        const reversal = await reverseMovement({
+          movementId: order.accountMovementId.toString(),
+          description: 'Corrección de forma de pago: el cliente abonó en efectivo',
+          createdBy: opts.driverUserId,
+          session: opts.session,
+        });
+        order.cancellationMovementId = reversal._id;
+      }
+      order.accountMovementId = null;
+    }
+    if (order.totalFinalMinor > 0) {
+      const attempt = await nextCashCollectionAttempt(order._id);
+      const cash = await postCashCollection({
+        clientId: order.clientId.toString(),
+        amountMinor: order.totalFinalMinor,
+        description: 'Cobro en efectivo (corrección de forma de pago)',
+        orderId: order._id.toString(),
+        driverId: opts.driverUserId,
+        idempotencyKey: cashCollectionIdempotencyKeyForAttempt(
+          order._id,
+          attempt,
+        ),
+        createdBy: opts.driverUserId,
+        session: opts.session,
+      });
+      order.cashMovementId = cash._id;
+    }
+    order.paymentMethod = ORDER_PAYMENT_METHODS.CASH;
+  } else {
+    // Was collected in cash → reverse the cash collection and charge the
+    // cuenta corriente instead.
+    if (order.cashMovementId) {
+      await reverseCashMovement({
+        movementId: order.cashMovementId.toString(),
+        description:
+          'Corrección de forma de pago: el cliente abonó en cuenta corriente',
+        createdBy: opts.driverUserId,
+        session: opts.session,
+      });
+      order.cashMovementId = null;
+    }
+    if (order.totalFinalMinor > 0) {
+      const attempt = await nextChargeAttempt(order._id);
+      const movement = await postMovement({
+        clientId: order.clientId.toString(),
+        direction: 'DEBIT',
+        amountMinor: order.totalFinalMinor,
+        movementType: 'ORDER_CHARGE',
+        description: 'Pedido confirmado (corrección de forma de pago)',
+        sourceType: 'ORDER',
+        sourceId: order._id.toString(),
+        idempotencyKey: chargeIdempotencyKeyForAttempt(order._id, attempt),
+        createdBy: opts.driverUserId,
+        session: opts.session,
+      });
+      order.accountMovementId = movement._id;
+    }
+    order.paymentMethod = ORDER_PAYMENT_METHODS.ACCOUNT;
+  }
+  order.paymentMethodChangedAt = opts.now;
+  order.paymentMethodChangeReason =
+    opts.reason.length > 0 ? opts.reason : null;
 }
 
 // ============================================================================

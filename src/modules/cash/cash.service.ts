@@ -280,6 +280,41 @@ interface AggregateRow {
   lastMovementAt: Date | null;
 }
 
+/**
+ * The cash ledger has no `direction`: a reversal is a movement of the same
+ * positive amount with type CASH_REVERSAL. Totals are therefore NET:
+ * collections minus reversals, so an annulled delivery stops counting as
+ * cash collected.
+ */
+const NET_COLLECTED_MINOR = {
+  $sum: {
+    $cond: [
+      { $eq: ['$movementType', CASH_MOVEMENT_TYPES.CASH_REVERSAL] },
+      { $multiply: ['$amountMinor', -1] },
+      '$amountMinor',
+    ],
+  },
+};
+
+const NET_MOVEMENT_COUNT = {
+  $sum: {
+    $cond: [
+      { $eq: ['$movementType', CASH_MOVEMENT_TYPES.CASH_REVERSAL] },
+      -1,
+      1,
+    ],
+  },
+};
+
+const CASH_LEDGER_MATCH = {
+  movementType: {
+    $in: [
+      CASH_MOVEMENT_TYPES.CASH_COLLECTION,
+      CASH_MOVEMENT_TYPES.CASH_REVERSAL,
+    ],
+  },
+};
+
 async function aggregateTotals(
   match: Record<string, unknown>,
 ): Promise<AggregateRow> {
@@ -289,12 +324,12 @@ async function aggregateTotals(
     movementCount: number;
     lastMovementAt: Date | null;
   }>([
-    { $match: match },
+    { $match: { ...CASH_LEDGER_MATCH, ...match } },
     {
       $group: {
         _id: null,
-        totalCollectedMinor: { $sum: '$amountMinor' },
-        movementCount: { $sum: 1 },
+        totalCollectedMinor: NET_COLLECTED_MINOR,
+        movementCount: NET_MOVEMENT_COUNT,
         lastMovementAt: { $max: '$occurredAt' },
       },
     },
@@ -317,7 +352,6 @@ export async function getClientCashSummary(
   }
   return aggregateTotals({
     clientId: new Types.ObjectId(clientId),
-    movementType: CASH_MOVEMENT_TYPES.CASH_COLLECTION,
   });
 }
 
@@ -329,7 +363,6 @@ export async function getDriverCashSummary(
   }
   return aggregateTotals({
     driverId: new Types.ObjectId(driverId),
-    movementType: CASH_MOVEMENT_TYPES.CASH_COLLECTION,
   });
 }
 
@@ -544,7 +577,7 @@ export async function aggregateCashByDriver(opts: {
   dateTo?: Date;
 }): Promise<DriverCashAggregate[]> {
   const match: Record<string, unknown> = {
-    movementType: CASH_MOVEMENT_TYPES.CASH_COLLECTION,
+    ...CASH_LEDGER_MATCH,
     driverId: { $ne: null },
   };
   if (opts.dateFrom || opts.dateTo) {
@@ -563,8 +596,8 @@ export async function aggregateCashByDriver(opts: {
     {
       $group: {
         _id: '$driverId',
-        totalCollectedMinor: { $sum: '$amountMinor' },
-        movementCount: { $sum: 1 },
+        totalCollectedMinor: NET_COLLECTED_MINOR,
+        movementCount: NET_MOVEMENT_COUNT,
         lastMovementAt: { $max: '$occurredAt' },
       },
     },
@@ -598,7 +631,7 @@ export async function aggregateCashByClient(opts: {
   limit?: number;
 }): Promise<{ items: ClientCashAggregate[]; total: number; pages: number }> {
   const match: Record<string, unknown> = {
-    movementType: CASH_MOVEMENT_TYPES.CASH_COLLECTION,
+    ...CASH_LEDGER_MATCH,
   };
   if (opts.dateFrom || opts.dateTo) {
     const range: Record<string, Date> = {};
@@ -627,8 +660,8 @@ export async function aggregateCashByClient(opts: {
     {
       $group: {
         _id: '$clientId',
-        totalCollectedMinor: { $sum: '$amountMinor' },
-        movementCount: { $sum: 1 },
+        totalCollectedMinor: NET_COLLECTED_MINOR,
+        movementCount: NET_MOVEMENT_COUNT,
         lastMovementAt: { $max: '$occurredAt' },
       },
     },
