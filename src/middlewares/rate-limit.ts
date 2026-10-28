@@ -75,6 +75,41 @@ export const paymentSubmitLimiter = submitLimitEnabled
   : (_req: unknown, _res: unknown, next: (err?: unknown) => void) => next();
 
 /**
+ * Rate limit for the repartidor account-adjustment endpoint
+ * (`POST /api/accounts/driver/:clientId/adjustments`).
+ *   - 30 movements / 15 minutes / user.
+ *
+ * This is NOT a monetary limit (the municipality decided not to cap amounts);
+ * it only prevents a buggy mobile client from flooding the ledger.
+ *
+ * Disabled in tests so suites can exercise the endpoint without hitting an
+ * artificial cap.
+ */
+const driverAdjustmentLimitEnabled = process.env.NODE_ENV !== 'test';
+
+export const driverAdjustmentLimiter = driverAdjustmentLimitEnabled
+  ? rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 30,
+      standardHeaders: true,
+      legacyHeaders: false,
+      keyGenerator: (req) => {
+        const userId = req.user?.id;
+        if (userId) return `u:${userId}`;
+        return `ip:${req.ip ?? 'unknown'}`;
+      },
+      message: {
+        success: false,
+        error: {
+          code: 'RATE_LIMIT',
+          message:
+            'Alcanzaste el límite de movimientos por cuenta corriente. Intentá nuevamente más tarde.',
+        },
+      },
+    })
+  : (_req: unknown, _res: unknown, next: (err?: unknown) => void) => next();
+
+/**
  * Rate limit for self-service password recovery endpoints
  * (`forgot-password`, `reset-password/validate`, `reset-password`).
  *

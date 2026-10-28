@@ -1,11 +1,14 @@
 import { z } from 'zod';
+import { ALL_CLIENT_TYPES, type ClientType } from '../clients/clients.types.js';
 import {
   ALL_PRODUCT_TYPES,
-  MAX_BASE_PRICE_MINOR,
+  MAX_PRICE_MINOR,
   SORTABLE_PRODUCT_FIELDS,
   type ProductSortableField,
   type ProductType,
 } from './products.types.js';
+
+const MAX_PRICE_ARS = MAX_PRICE_MINOR / 100;
 
 const trimmedRequired = (max: number, message: string) =>
   z
@@ -55,7 +58,53 @@ const basePriceMinorSchema = z
   })
   .int('El precio base debe ser un entero')
   .min(0, 'El precio base no puede ser negativo')
-  .max(MAX_BASE_PRICE_MINOR, `El precio base máximo es ${MAX_BASE_PRICE_MINOR}`);
+  .max(MAX_PRICE_MINOR, `El precio base máximo es $${MAX_PRICE_ARS}`);
+
+/**
+ * Precio final exacto por tipo de cliente.
+ *
+ * `basePriceMinorAtSet` NO se recibe del cliente: lo sella el servidor.
+ */
+const clientTypePriceSchema = z
+  .object({
+    clientType: z.enum(ALL_CLIENT_TYPES as [ClientType, ...ClientType[]], {
+      errorMap: () => ({ message: 'Tipo de cliente inválido' }),
+    }),
+    priceMinor: z
+      .number({
+        invalid_type_error: 'El precio debe ser un número entero',
+        required_error: 'El precio es obligatorio',
+      })
+      .int('El precio debe ser un entero')
+      .min(0, 'El precio no puede ser negativo')
+      .max(MAX_PRICE_MINOR, `El precio máximo es $${MAX_PRICE_ARS}`),
+  })
+  .strict();
+
+const clientTypePricesSchema = z
+  .array(clientTypePriceSchema)
+  .max(ALL_CLIENT_TYPES.length, 'Demasiados precios por tipo de cliente')
+  .superRefine((values, ctx) => {
+    const seen = new Set<ClientType>();
+    for (const value of values) {
+      if (value.clientType === 'LOCAL') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['clientType'],
+          message:
+            'LOCAL no admite precio fijo: el precio base ya es el precio local',
+        });
+      }
+      if (seen.has(value.clientType)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['clientType'],
+          message: `Precio duplicado para el tipo de cliente ${value.clientType}`,
+        });
+      }
+      seen.add(value.clientType);
+    }
+  });
 
 export const createProductSchema = z.object({
   code: codeSchema,
@@ -65,6 +114,7 @@ export const createProductSchema = z.object({
     errorMap: () => ({ message: 'Tipo de producto inválido' }),
   }),
   basePriceMinor: basePriceMinorSchema,
+  clientTypePrices: clientTypePricesSchema.optional().default([]),
   tracksStock: z.boolean().optional().default(false),
   active: z.boolean().optional().default(true),
 });
@@ -82,6 +132,7 @@ export const updateProductSchema = z
       })
       .optional(),
     basePriceMinor: basePriceMinorSchema.optional(),
+    clientTypePrices: clientTypePricesSchema.optional(),
     tracksStock: z.boolean().optional(),
     active: z.boolean().optional(),
   })

@@ -221,6 +221,85 @@ async function main(): Promise<void> {
     `\n   HTTP /api/pricing/quote: bidón x2 JUBILADO base=$30.000 final=$${(apiRes.body.data.totals.finalMinor / 100).toFixed(2)}`,
   );
 
+  // 12) Precio EXACTO por tipo de cliente (matriz de precios)
+  console.log('\n12) Cargar precio exacto JUBILADO = $6.500 para la Recarga (base $10.000)');
+  agua.clientTypePrices = [
+    {
+      clientType: 'JUBILADO',
+      priceMinor: 650_000,
+      basePriceMinorAtSet: agua.basePriceMinor,
+    },
+  ];
+  await agua.save();
+
+  const fixedQuote = await buildQuote(clients.JUBILADO._id.toString(), [
+    { productId: agua._id.toString(), quantity: 1 },
+  ]);
+  const fixedLine = fixedQuote.items[0];
+  console.log(
+    `   JUBILADO     base=$10.000 final=$${(fixedLine.unitFinalPriceMinor / 100).toFixed(2)} margen=${fixedLine.adjustmentPercentage}% origen=${fixedLine.priceSource}`,
+  );
+  if (fixedLine.unitFinalPriceMinor !== 650_000) {
+    throw new Error(
+      `Expected 650000 minor for JUBILADO with fixed price, got ${fixedLine.unitFinalPriceMinor}`,
+    );
+  }
+  if (fixedLine.priceSource !== 'FIXED') {
+    throw new Error('Expected priceSource FIXED');
+  }
+  if (fixedLine.adjustmentPercentage !== -35) {
+    throw new Error('Expected implied margin -35%');
+  }
+
+  // 13) Matriz de precios
+  const matrixRes = await request(app)
+    .get('/api/pricing/price-matrix')
+    .set('Authorization', `Bearer ${adminToken}`);
+  if (matrixRes.status !== 200) {
+    throw new Error(`HTTP price-matrix failed: ${matrixRes.status}`);
+  }
+  const matrixRow = matrixRes.body.data.items.find(
+    (r: { productId: string }) => r.productId === agua._id.toString(),
+  );
+  for (const cell of matrixRow.cells) {
+    console.log(
+      `   ${cell.clientType.padEnd(13)} precio=$${(cell.priceMinor / 100).toFixed(2)} origen=${cell.source} margen=${cell.impliedPercentage}% desactualizado=${cell.stale}`,
+    );
+  }
+  const fixedCell = matrixRow.cells.find(
+    (c: { clientType: string }) => c.clientType === 'JUBILADO',
+  );
+  if (!fixedCell.hasFixedPrice || fixedCell.source !== 'FIXED') {
+    throw new Error('Expected the matrix to show a FIXED cell');
+  }
+
+  // 14) Volver al % (borrar el precio exacto)
+  console.log('\n14) Volver al % (borrar el precio exacto de JUBILADO)');
+  const clearRes = await request(app)
+    .patch('/api/pricing/price-matrix')
+    .set('Authorization', `Bearer ${adminToken}`)
+    .send({
+      items: [
+        {
+          productId: agua._id.toString(),
+          clientType: 'JUBILADO',
+          priceMinor: null,
+        },
+      ],
+    });
+  if (clearRes.status !== 200) {
+    throw new Error(`HTTP price-matrix clear failed: ${clearRes.status}`);
+  }
+  const backToRule = await buildQuote(clients.JUBILADO._id.toString(), [
+    { productId: agua._id.toString(), quantity: 1 },
+  ]);
+  console.log(
+    `   JUBILADO     base=$10.000 final=$${(backToRule.items[0].unitFinalPriceMinor / 100).toFixed(2)} origen=${backToRule.items[0].priceSource}`,
+  );
+  if (backToRule.items[0].unitFinalPriceMinor !== 700_000) {
+    throw new Error('Expected the -30% rule to apply again');
+  }
+
   console.log('\n✅ Smoke test FASE 3 OK');
 
   await teardownTestDb();

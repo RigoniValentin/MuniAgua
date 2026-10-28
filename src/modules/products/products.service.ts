@@ -1,10 +1,15 @@
 import { Types } from 'mongoose';
-import { Product, type ProductDocument } from './products.model.js';
+import {
+  Product,
+  type ProductClientTypePrice,
+  type ProductDocument,
+} from './products.model.js';
 import {
   PRODUCTS_LIST_DEFAULT_LIMIT,
   type ProductListQuery,
 } from './products.validation.js';
 import { ConflictError, NotFoundError } from '../../shared/errors.js';
+import type { ClientType } from '../clients/clients.types.js';
 import type { ProductType } from './products.types.js';
 
 export interface ProductListPagination {
@@ -26,6 +31,7 @@ export interface ProductDto {
   description: string | null;
   productType: ProductType;
   basePriceMinor: number;
+  clientTypePrices: ProductClientTypePrice[];
   tracksStock: boolean;
   active: boolean;
   createdAt: Date;
@@ -34,12 +40,22 @@ export interface ProductDto {
   updatedBy: string | null;
 }
 
+/**
+ * Precio fijo recibido del cliente (sin el sello `basePriceMinorAtSet`,
+ * que lo calcula el servidor).
+ */
+export interface ProductClientTypePriceInput {
+  clientType: ClientType;
+  priceMinor: number;
+}
+
 export interface CreateProductArgs {
   code: string;
   name: string;
   description?: string | null;
   productType: ProductType;
   basePriceMinor: number;
+  clientTypePrices?: ProductClientTypePriceInput[];
   tracksStock?: boolean;
   active?: boolean;
   createdBy?: string | null;
@@ -51,9 +67,28 @@ export interface UpdateProductArgs {
   description?: string | null;
   productType?: ProductType;
   basePriceMinor?: number;
+  clientTypePrices?: ProductClientTypePriceInput[];
   tracksStock?: boolean;
   active?: boolean;
   updatedBy?: string | null;
+}
+
+/**
+ * Sella los precios fijos con el precio base vigente.
+ *
+ * El sello permite detectar (en la matriz de precios) que el precio base
+ * cambió después de que el precio fijo fue cargado, sin modificar nunca
+ * el precio que el administrador eligió.
+ */
+export function stampClientTypePrices(
+  prices: ProductClientTypePriceInput[],
+  basePriceMinor: number,
+): ProductClientTypePrice[] {
+  return prices.map((price) => ({
+    clientType: price.clientType,
+    priceMinor: price.priceMinor,
+    basePriceMinorAtSet: basePriceMinor,
+  }));
 }
 
 export function toProductDto(doc: ProductDocument): ProductDto {
@@ -64,6 +99,11 @@ export function toProductDto(doc: ProductDocument): ProductDto {
     description: doc.description ?? null,
     productType: doc.productType,
     basePriceMinor: doc.basePriceMinor,
+    clientTypePrices: (doc.clientTypePrices ?? []).map((price) => ({
+      clientType: price.clientType,
+      priceMinor: price.priceMinor,
+      basePriceMinorAtSet: price.basePriceMinorAtSet,
+    })),
     tracksStock: doc.tracksStock,
     active: doc.active,
     createdAt: doc.createdAt,
@@ -172,6 +212,10 @@ export async function createProduct(
     description: args.description ?? null,
     productType: args.productType,
     basePriceMinor: args.basePriceMinor,
+    clientTypePrices: stampClientTypePrices(
+      args.clientTypePrices ?? [],
+      args.basePriceMinor,
+    ),
     tracksStock: args.tracksStock ?? false,
     active: args.active ?? true,
     createdBy: createdById,
@@ -201,6 +245,14 @@ export async function updateProduct(
   if (args.productType !== undefined) product.productType = args.productType;
   if (args.basePriceMinor !== undefined) {
     product.basePriceMinor = args.basePriceMinor;
+  }
+  // Los precios fijos se sellan con el precio base ya actualizado, de modo que
+  // un payload que re-confirma los precios queda siempre al día.
+  if (args.clientTypePrices !== undefined) {
+    product.clientTypePrices = stampClientTypePrices(
+      args.clientTypePrices,
+      product.basePriceMinor,
+    );
   }
   if (args.tracksStock !== undefined) {
     product.tracksStock = args.tracksStock;

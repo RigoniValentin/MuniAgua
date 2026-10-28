@@ -27,18 +27,7 @@ export interface PricingRuleDocument extends Document {
   updatedBy?: Types.ObjectId | null;
 }
 
-interface PricingRuleModel extends Model<PricingRuleDocument> {
-  findEquivalentActive(
-    args: Partial<{
-      clientType: ClientType;
-      scope: PricingScope;
-      productType: ProductType | null;
-      productId: Types.ObjectId | null;
-      priority: number;
-      active: boolean;
-    }>,
-  ): Promise<PricingRuleDocument | null>;
-}
+type PricingRuleModel = Model<PricingRuleDocument>;
 
 const pricingRuleSchema = new Schema<PricingRuleDocument, PricingRuleModel>(
   {
@@ -116,26 +105,6 @@ pricingRuleSchema.index({ clientType: 1, active: 1 });
 pricingRuleSchema.index({ scope: 1, productType: 1 });
 pricingRuleSchema.index({ scope: 1, productId: 1 });
 pricingRuleSchema.index({ priority: -1 });
-
-pricingRuleSchema.statics.findEquivalentActive = function (
-  args: Partial<{
-    clientType: ClientType;
-    scope: PricingScope;
-    productType: ProductType | null;
-    productId: Types.ObjectId | null;
-    priority: number;
-    active: boolean;
-  }>,
-) {
-  const filter: Record<string, unknown> = {};
-  if (args.clientType !== undefined) filter.clientType = args.clientType;
-  if (args.scope !== undefined) filter.scope = args.scope;
-  if (args.productType !== undefined) filter.productType = args.productType;
-  if (args.productId !== undefined) filter.productId = args.productId;
-  if (args.priority !== undefined) filter.priority = args.priority;
-  if (args.active !== undefined) filter.active = args.active;
-  return this.findOne(filter);
-};
 
 export const PricingRule: PricingRuleModel =
   (mongoose.models.PricingRule as PricingRuleModel | undefined) ??

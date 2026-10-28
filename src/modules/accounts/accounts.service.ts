@@ -29,12 +29,14 @@ import {
   type SourceType,
 } from './accounts.types.js';
 import { Client, type ClientDocument } from '../clients/clients.model.js';
+import { User } from '../users/users.model.js';
 import { ConflictError, NotFoundError, ValidationError } from '../../shared/errors.js';
 import {
   ACCOUNTS_LIST_DEFAULT_LIMIT,
   type AccountsListQuery,
 } from './accounts.validation.js';
 import type { ClientType } from '../clients/clients.types.js';
+import type { Role } from '../users/users.types.js';
 
 // ============================================================================
 // Public DTOs
@@ -54,7 +56,21 @@ export interface AccountMovementDto {
   idempotencyKey: string | null;
   reversesMovementId: string | null;
   createdBy: string | null;
+  /** Role of the actor at the time of the operation (frozen snapshot). */
+  createdByRole: Role | null;
+  /** Display name of the actor, resolved on read (not denormalized). */
+  createdByName: string | null;
   createdAt: Date;
+}
+
+/**
+ * Identity of the user that registered a movement. Resolved on read so the
+ * ledger never stores duplicated personal data, while `createdByRole` keeps
+ * the frozen (durable) part of the audit trail.
+ */
+export interface MovementActor {
+  name: string | null;
+  role: Role | null;
 }
 
 export interface AccountSummary {
@@ -126,7 +142,10 @@ export interface MovementsListResult {
 // DTO helpers
 // ============================================================================
 
-export function toMovementDto(doc: AccountMovementDocument): AccountMovementDto {
+export function toMovementDto(
+  doc: AccountMovementDocument,
+  actor?: MovementActor | null,
+): AccountMovementDto {
   const signed = signedContribution(doc.direction, doc.amountMinor);
   return {
     id: doc._id.toString(),
@@ -144,8 +163,40 @@ export function toMovementDto(doc: AccountMovementDocument): AccountMovementDto 
       ? doc.reversesMovementId.toString()
       : null,
     createdBy: doc.createdBy ? doc.createdBy.toString() : null,
+    createdByRole: doc.createdByRole ?? null,
+    createdByName: actor?.name ?? null,
     createdAt: doc.createdAt,
   };
+}
+
+/**
+ * Batch-resolves the actors of a page of movements (avoid N+1 on render).
+ * Mirrors the driver-name prefetch already used by the cash module.
+ */
+export async function resolveMovementActors(
+  createdByIds: Array<string | null | undefined>,
+): Promise<Map<string, MovementActor>> {
+  const ids = Array.from(
+    new Set(
+      createdByIds
+        .filter((v): v is string => Boolean(v) && Types.ObjectId.isValid(v as string))
+        .map((v) => v),
+    ),
+  );
+  if (ids.length === 0) return new Map();
+
+  const users = await User.find({ _id: { $in: ids } }).select(
+    'firstName lastName role',
+  );
+  return new Map(
+    users.map((u) => [
+      u._id.toString(),
+      {
+        name: `${u.firstName} ${u.lastName}`.trim(),
+        role: u.role,
+      },
+    ]),
+  );
 }
 
 // ============================================================================
@@ -243,6 +294,8 @@ export interface PostMovementArgs {
   sourceId?: string | null;
   idempotencyKey?: string | null;
   createdBy?: string | null;
+  /** Frozen role snapshot of the actor. Persisted for a durable audit trail. */
+  createdByRole?: Role | null;
   occurredAt?: Date;
   reversesMovementId?: string | null;
   session?: ClientSession;
@@ -309,6 +362,7 @@ export async function postMovement(
           idempotencyKey,
           reversesMovementId: reversesObjectId,
           createdBy: createdByObjectId,
+          createdByRole: args.createdByRole ?? null,
         },
       ],
       { session: args.session },
@@ -469,9 +523,19 @@ export async function listClientMovements(
     AccountMovement.countDocuments(filter),
   ]);
 
+  // Resolve "who registered this movement" for the whole page in one query.
+  const actors = await resolveMovementActors(
+    docs.map((d) => (d.createdBy ? d.createdBy.toString() : null)),
+  );
+
   const pages = args.limit > 0 ? Math.max(1, Math.ceil(total / args.limit)) : 1;
   return {
-    items: docs.map(toMovementDto),
+    items: docs.map((doc) =>
+      toMovementDto(
+        doc,
+        doc.createdBy ? actors.get(doc.createdBy.toString()) : undefined,
+      ),
+    ),
     pagination: { page: args.page, limit: args.limit, total, pages },
   };
 }
@@ -484,6 +548,7 @@ export interface ReverseMovementArgs {
   movementId: string;
   description: string;
   createdBy?: string | null;
+  createdByRole?: Role | null;
   session?: ClientSession;
 }
 
@@ -530,6 +595,7 @@ export async function reverseMovement(
     sourceId: original._id.toString(),
     reversesMovementId: original._id.toString(),
     createdBy: args.createdBy ?? null,
+    createdByRole: args.createdByRole ?? null,
     occurredAt: new Date(),
     session: args.session,
   });
@@ -545,6 +611,7 @@ export interface CreateManualAdjustmentArgs {
   amountMinor: number;
   description: string;
   createdBy?: string | null;
+  createdByRole?: Role | null;
 }
 
 export async function createManualAdjustment(
@@ -566,7 +633,163 @@ export async function createManualAdjustment(
     description: args.description,
     sourceType: 'MANUAL',
     createdBy: args.createdBy ?? null,
+    createdByRole: args.createdByRole ?? null,
   });
+}
+
+// ============================================================================
+// Driver adjustment (repartidor — cobro en el domicilio)
+// ============================================================================
+
+export interface CreateDriverAdjustmentArgs {
+  clientId: string;
+  direction: Direction;
+  amountMinor: number;
+  description: string;
+  /** The repartidor. Always comes from the authenticated session. */
+  driverId: string;
+  driverRole: Role;
+  /** Optional client-supplied key so a network retry is not a double posting. */
+  idempotencyKey?: string | null;
+  session?: ClientSession;
+}
+
+/**
+ * Registers a manual DEBIT/CREDIT on a client account made by a repartidor
+ * (e.g. collecting in cash at the door and imputing it to the account).
+ *
+ * Rules that keep the book correct:
+ *   - The ledger is still written through `postMovement()` (single write path).
+ *   - The movement type and source type are derived server-side; the caller
+ *     can only choose direction, amount and description.
+ *   - The actor is taken from the session, never from the payload.
+ *   - Inactive clients are NOT blocked: the cta cte is independent from the
+ *     "enabled to order" policy (see README — "Clientes inactivos").
+ */
+export async function createDriverAdjustment(
+  args: CreateDriverAdjustmentArgs,
+): Promise<AccountMovementDocument> {
+  if (!Types.ObjectId.isValid(args.clientId)) {
+    throw new ValidationError('Identificador de cliente inválido');
+  }
+  if (!args.driverId || !Types.ObjectId.isValid(args.driverId)) {
+    throw new ValidationError('Repartidor inválido');
+  }
+  if (!Number.isInteger(args.amountMinor) || args.amountMinor <= 0) {
+    throw new ValidationError('amountMinor debe ser un entero positivo');
+  }
+  if (!args.description || !args.description.trim()) {
+    throw new ValidationError('La descripción es obligatoria');
+  }
+
+  const client = await Client.findById(args.clientId);
+  if (!client) {
+    throw new NotFoundError('Cliente no encontrado');
+  }
+
+  return postMovement({
+    clientId: args.clientId,
+    direction: args.direction,
+    amountMinor: args.amountMinor,
+    movementType: 'DRIVER_ADJUSTMENT',
+    description: args.description,
+    sourceType: 'DRIVER',
+    idempotencyKey: args.idempotencyKey ?? null,
+    createdBy: args.driverId,
+    createdByRole: args.driverRole,
+    session: args.session,
+  });
+}
+
+export interface DriverMovementDto extends AccountMovementDto {
+  /** Display name of the client the movement belongs to. */
+  clientName: string | null;
+}
+
+export interface DriverMovementsListResult {
+  items: DriverMovementDto[];
+  pagination: MovementsListPagination;
+}
+
+export interface ListDriverMovementsArgs {
+  driverId: string;
+  page: number;
+  limit: number;
+  direction?: Direction;
+  dateFrom?: Date;
+  dateTo?: Date;
+}
+
+/**
+ * Movements registered by ONE repartidor. Always scoped by `driverId`
+ * (the authenticated user) — the caller can never ask for someone else's rows.
+ */
+export async function listDriverMovements(
+  args: ListDriverMovementsArgs,
+): Promise<DriverMovementsListResult> {
+  if (!Types.ObjectId.isValid(args.driverId)) {
+    throw new ValidationError('Identificador de repartidor inválido');
+  }
+
+  const filter: Record<string, unknown> = {
+    createdBy: new Types.ObjectId(args.driverId),
+    movementType: 'DRIVER_ADJUSTMENT',
+  };
+  if (args.direction) {
+    filter.direction = args.direction;
+  }
+  if (args.dateFrom || args.dateTo) {
+    const range: Record<string, Date> = {};
+    if (args.dateFrom) range.$gte = args.dateFrom;
+    if (args.dateTo) range.$lte = args.dateTo;
+    filter.occurredAt = range;
+  }
+
+  const page = args.page;
+  const limit = args.limit;
+  const skip = (page - 1) * limit;
+  const [docs, total] = await Promise.all([
+    AccountMovement.find(filter)
+      .sort({ occurredAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit),
+    AccountMovement.countDocuments(filter),
+  ]);
+
+  const actors = await resolveMovementActors(
+    docs.map((d) => (d.createdBy ? d.createdBy.toString() : null)),
+  );
+
+  // Client names for the page (one query, no N+1).
+  const clientIds = Array.from(
+    new Set(docs.map((d) => d.clientId.toString())),
+  );
+  let clientNames: Map<string, string> = new Map();
+  if (clientIds.length > 0) {
+    const clients = await Client.find({ _id: { $in: clientIds } }).select(
+      'firstName lastName',
+    );
+    clientNames = new Map(
+      clients.map((c) => [
+        c._id.toString(),
+        `${c.firstName} ${c.lastName}`.trim(),
+      ]),
+    );
+  }
+
+  const items: DriverMovementDto[] = docs.map((doc) => ({
+    ...toMovementDto(
+      doc,
+      doc.createdBy ? actors.get(doc.createdBy.toString()) : undefined,
+    ),
+    clientName: clientNames.get(doc.clientId.toString()) ?? null,
+  }));
+
+  const pages = limit > 0 ? Math.max(1, Math.ceil(total / limit)) : 1;
+  return {
+    items,
+    pagination: { page, limit, total, pages },
+  };
 }
 
 // ============================================================================

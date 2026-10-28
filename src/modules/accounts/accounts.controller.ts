@@ -2,12 +2,15 @@ import type { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import {
   createAdjustmentSchema,
+  createDriverAdjustmentSchema,
   reverseMovementSchema,
   accountsListQuerySchema,
+  driverMovementsListQuerySchema,
   movementsListQuerySchema,
   MOVEMENTS_LIST_DEFAULT_LIMIT,
 } from './accounts.validation.js';
 import {
+  createDriverAdjustment,
   createManualAdjustment,
   getClientAccountSummary,
   getClientAccountSummaryResponse,
@@ -15,6 +18,8 @@ import {
   getMovementOrThrow,
   listAccounts,
   listClientMovements,
+  listDriverMovements,
+  resolveMovementActors,
   reverseMovement,
   toMovementDto,
   IdempotencyConflictError,
@@ -25,6 +30,7 @@ import { ValidationError } from '../../shared/errors.js';
 import { ConflictError } from '../../shared/errors.js';
 import { findClientByUserId } from './accounts.service.js';
 import { ClientNotLinkedError } from '../clients/clients.service.js';
+import type { AccountMovementDocument } from './account-movements.model.js';
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -46,6 +52,18 @@ function requireObjectIdParam(value: string | undefined, fieldLabel: string): st
     throw new ValidationError(`${fieldLabel} inválido`);
   }
   return value;
+}
+
+/**
+ * Maps a single movement to its DTO, resolving who registered it so the
+ * admin always sees the author of every financial effect.
+ */
+async function toMovementResponse(
+  doc: AccountMovementDocument,
+): Promise<ReturnType<typeof toMovementDto>> {
+  const createdBy = doc.createdBy ? doc.createdBy.toString() : null;
+  const actors = await resolveMovementActors([createdBy]);
+  return toMovementDto(doc, createdBy ? actors.get(createdBy) : undefined);
 }
 
 // ----------------------------------------------------------------------------
@@ -112,8 +130,9 @@ export const createAdjustmentController = asyncHandler(
         amountMinor: data.amountMinor,
         description: data.description,
         createdBy,
+        createdByRole: req.user?.role ?? null,
       });
-      res.status(201).json(ok({ movement: toMovementDto(movement) }));
+      res.status(201).json(ok({ movement: await toMovementResponse(movement) }));
     } catch (err) {
       if (err instanceof IdempotencyConflictError) {
         throw new ConflictError(
@@ -142,8 +161,9 @@ export const reverseMovementController = asyncHandler(
         movementId,
         description: data.description,
         createdBy,
+        createdByRole: req.user?.role ?? null,
       });
-      res.status(201).json(ok({ reversal: toMovementDto(reversal) }));
+      res.status(201).json(ok({ reversal: await toMovementResponse(reversal) }));
     } catch (err) {
       if (err instanceof IdempotencyConflictError) {
         throw new ConflictError(
@@ -152,6 +172,58 @@ export const reverseMovementController = asyncHandler(
       }
       throw err;
     }
+  },
+);
+
+// ----------------------------------------------------------------------------
+// Repartidor — ajuste manual en la cuenta corriente (cobro en el domicilio)
+// ----------------------------------------------------------------------------
+
+export const createDriverAdjustmentController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const clientId = requireObjectIdParam(
+      req.params.clientId,
+      'Identificador de cliente',
+    );
+    const data = createDriverAdjustmentSchema.parse(req.body);
+    // The actor is NEVER taken from the payload — it comes from the session
+    // (JWT), so a driver can only register movements under their own name.
+    const driverId = requireUserId(req);
+    try {
+      const movement = await createDriverAdjustment({
+        clientId,
+        direction: data.direction,
+        amountMinor: data.amountMinor,
+        description: data.description,
+        driverId,
+        driverRole: req.user?.role ?? 'REPARTIDOR',
+        idempotencyKey: data.idempotencyKey ?? null,
+      });
+      res.status(201).json(ok({ movement: await toMovementResponse(movement) }));
+    } catch (err) {
+      if (err instanceof IdempotencyConflictError) {
+        throw new ConflictError(
+          'La clave de idempotencia ya fue utilizada con datos distintos',
+        );
+      }
+      throw err;
+    }
+  },
+);
+
+export const listMyDriverMovementsController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const driverId = requireUserId(req);
+    const query = driverMovementsListQuerySchema.parse(req.query);
+    const result = await listDriverMovements({
+      driverId,
+      page: query.page,
+      limit: query.limit ?? MOVEMENTS_LIST_DEFAULT_LIMIT,
+      direction: query.direction,
+      dateFrom: query.dateFrom,
+      dateTo: query.dateTo,
+    });
+    res.json(ok(result));
   },
 );
 

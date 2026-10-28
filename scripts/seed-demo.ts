@@ -40,6 +40,7 @@ import { Order } from '../src/modules/orders/orders.model.js';
 import { AccountMovement } from '../src/modules/accounts/account-movements.model.js';
 import { Payment } from '../src/modules/payments/payments.model.js';
 import { getPaymentReceiptStorage } from '../src/modules/payments/payments.storage.js';
+import { computeAdjustment } from '../src/shared/money.js';
 import { logger } from '../src/shared/logger.js';
 
 interface UserSeed {
@@ -285,10 +286,7 @@ function snapshotLine(
 ): SnapshotLine {
   const percentage = rule?.adjustmentValue ?? 0;
   const unitBase = product.basePriceMinor;
-  const unitFinal = Math.max(
-    0,
-    Math.round((unitBase * (100 + percentage)) / 100),
-  );
+  const unitFinal = computeAdjustment(unitBase, percentage).finalMinor;
   return {
     productId: product._id,
     productCode: product.code,

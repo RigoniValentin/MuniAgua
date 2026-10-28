@@ -1379,6 +1379,64 @@ describe('Snapshot de precios', () => {
     const movements = await AccountMovement.find({ clientId: client._id }).lean();
     expect(movements.reduce((acc, m) => acc + m.amountMinor, 0)).toBe(1_300_000);
   });
+
+  it('cambiar el precio fijo NO afecta pedidos históricos', async () => {
+    const citizen = await seedUser('CIUDADANO', 'vecino@buchardo.gob.ar');
+    await seedClient({
+      userId: citizen._id,
+      clientType: 'JUBILADO',
+    });
+    const refill = await seedProduct({
+      basePriceMinor: 1_000_000,
+      productType: 'WATER_REFILL',
+    });
+    await seedPricingRule({
+      clientType: 'JUBILADO',
+      adjustmentValue: -50,
+    });
+    // Precio exacto cargado por el administrador.
+    refill.clientTypePrices = [
+      {
+        clientType: 'JUBILADO',
+        priceMinor: 650_000,
+        basePriceMinorAtSet: 1_000_000,
+      },
+    ];
+    await refill.save();
+    const token = await loginAs('vecino@buchardo.gob.ar');
+
+    const old = await request(app)
+      .post('/api/orders/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ items: [{ productId: refill._id.toString(), quantity: 1 }] });
+    expect(old.body.data.order.totalFinalMinor).toBe(650_000);
+    expect(old.body.data.order.items[0].priceSource).toBe('FIXED');
+    expect(old.body.data.order.items[0].adjustmentPercentage).toBe(-35);
+
+    // Se cambia el precio exacto.
+    refill.clientTypePrices = [
+      {
+        clientType: 'JUBILADO',
+        priceMinor: 500_000,
+        basePriceMinorAtSet: 1_000_000,
+      },
+    ];
+    await refill.save();
+
+    // El pedido viejo sigue congelado en $650.000.
+    const oldRes = await request(app)
+      .get(`/api/orders/me/${old.body.data.order.id}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(oldRes.body.data.order.totalFinalMinor).toBe(650_000);
+    expect(oldRes.body.data.order.items[0].unitFinalPriceMinor).toBe(650_000);
+
+    // El pedido nuevo usa el precio exacto nuevo.
+    const fresh = await request(app)
+      .post('/api/orders/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ items: [{ productId: refill._id.toString(), quantity: 1 }] });
+    expect(fresh.body.data.order.totalFinalMinor).toBe(500_000);
+  });
 });
 
 // ===========================================================================

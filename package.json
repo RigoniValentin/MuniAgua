@@ -25,6 +25,7 @@
     "cleanup:testing": "node node_modules/tsx/dist/cli.mjs scripts/cleanup-testing.ts",
     "smoke:pricing": "node node_modules/tsx/dist/cli.mjs scripts/smoke-pricing.ts",
     "smoke:accounts": "node node_modules/tsx/dist/cli.mjs scripts/smoke-accounts.ts",
+    "smoke:driver-accounts": "node node_modules/tsx/dist/cli.mjs scripts/smoke-driver-accounts.ts",
     "smoke:citizen": "node node_modules/tsx/dist/cli.mjs scripts/smoke-citizen.ts",
     "smoke:payments": "node node_modules/tsx/dist/cli.mjs scripts/smoke-payments.ts",
     "smoke:mvp": "node node_modules/tsx/dist/cli.mjs scripts/smoke-mvp.ts",

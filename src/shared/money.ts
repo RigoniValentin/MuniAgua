@@ -59,11 +59,32 @@ export function assertMinorRange(minor: number, max: number, field = 'monto'): v
 /**
  * Round half-up (mathematical rounding) of an integer minor amount.
  */
-function roundHalfUp(value: number): number {
+export function roundHalfUp(value: number): number {
   if (value >= 0) {
     return Math.floor(value + 0.5);
   }
   return -Math.floor(-value + 0.5);
+}
+
+/**
+ * Percentage that a final amount represents relative to a base amount.
+ *
+ * Used to show the "margen equivalente" of an exact (fixed) price:
+ *   base $10.000, precio fijo $6.500 → -35%
+ *
+ * Returns 0 when the base is 0 (there is no meaningful ratio).
+ */
+export function impliedPercentage(baseMinor: number, priceMinor: number): number {
+  if (!Number.isInteger(baseMinor) || baseMinor < 0) {
+    throw new Error('baseMinor debe ser un entero no negativo');
+  }
+  if (!Number.isInteger(priceMinor)) {
+    throw new Error('priceMinor debe ser un entero');
+  }
+  if (baseMinor === 0) {
+    return 0;
+  }
+  return roundHalfUp(((priceMinor - baseMinor) / baseMinor) * 100);
 }
 
 /**

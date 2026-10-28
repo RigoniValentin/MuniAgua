@@ -5,6 +5,10 @@ import {
   listPricingRulesController,
   updatePricingRuleController,
 } from './pricing.rules.controller.js';
+import {
+  getPriceMatrixController,
+  updatePriceMatrixController,
+} from './pricing.matrix.controller.js';
 import { quoteController } from './pricing.quote.controller.js';
 import { selfQuoteController } from './pricing.me.quote.controller.js';
 import { authenticate } from '../../middlewares/authenticate.js';
@@ -21,6 +25,17 @@ router.post(
   '/me/quote',
   requirePermission(PERMISSIONS.PRICING_QUOTE),
   selfQuoteController,
+);
+
+router.get(
+  '/price-matrix',
+  requirePermission(PERMISSIONS.PRICING_READ),
+  getPriceMatrixController,
+);
+router.patch(
+  '/price-matrix',
+  requirePermission(PERMISSIONS.PRICING_MANAGE),
+  updatePriceMatrixController,
 );
 
 router.get('/rules', requirePermission(PERMISSIONS.PRICING_READ), listPricingRulesController);

@@ -9,6 +9,7 @@ import {
   type MovementType,
   type SourceType,
 } from './accounts.types.js';
+import { ALL_ROLES, type Role } from '../users/users.types.js';
 
 const trimmedShortText = (max: number, message?: string) =>
   z
@@ -68,6 +69,39 @@ export const createAdjustmentSchema = z
 export type CreateAdjustmentInput = z.infer<typeof createAdjustmentSchema>;
 
 /**
+ * POST /api/accounts/driver/:clientId/adjustments
+ *
+ * The repartidor (cobro en el domicilio) may only choose the direction, the
+ * amount and a mandatory reason. `movementType`, `sourceType`, `createdBy`
+ * and `createdByRole` are derived server-side from the session.
+ *
+ * `.strict()` is the mass-assignment guard: any attempt to post
+ * `createdBy`/`movementType` from the client is rejected with 400.
+ */
+export const createDriverAdjustmentSchema = z
+  .object({
+    direction: directionSchema,
+    amountMinor: z
+      .number()
+      .int('El importe debe ser un entero')
+      .positive('El importe debe ser mayor a 0')
+      .max(Number.MAX_SAFE_INTEGER, 'El importe excede el máximo permitido'),
+    description: trimmedShortText(500, 'La descripción es obligatoria'),
+    /** Optional: makes a network retry a no-op instead of a double posting. */
+    idempotencyKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200, 'Máximo 200 caracteres')
+      .optional(),
+  })
+  .strict();
+
+export type CreateDriverAdjustmentInput = z.infer<
+  typeof createDriverAdjustmentSchema
+>;
+
+/**
  * POST /api/accounts/movements/:movementId/reverse
  */
 export const reverseMovementSchema = z
@@ -95,6 +129,7 @@ export const postMovementSchema = z.object({
   sourceId: z.string().nullish(),
   idempotencyKey: z.string().trim().min(1).max(200).nullish(),
   createdBy: z.string().nullish(),
+  createdByRole: z.enum(ALL_ROLES as [Role, ...Role[]]).nullish(),
   occurredAt: z.date().optional(),
   reversesMovementId: z.string().nullish(),
 });
@@ -151,6 +186,55 @@ export const movementsListQuerySchema = z.object({
 });
 
 export type MovementsListQuery = z.infer<typeof movementsListQuerySchema>;
+
+/**
+ * GET /api/accounts/driver/me/movements
+ */
+export const driverMovementsListQuerySchema = z.object({
+  page: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? 1 : Number(v)))
+    .pipe(
+      z
+        .number()
+        .int('La página debe ser entera')
+        .min(1, 'La página debe ser mayor o igual a 1'),
+    ),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? MOVEMENTS_LIST_DEFAULT_LIMIT : Number(v)))
+    .pipe(
+      z
+        .number()
+        .int('El límite debe ser entero')
+        .min(1, 'El límite debe ser mayor o igual a 1')
+        .max(
+          MOVEMENTS_LIST_MAX_LIMIT,
+          `El límite máximo es ${MOVEMENTS_LIST_MAX_LIMIT}`,
+        ),
+    ),
+  direction: directionSchema.optional(),
+  dateFrom: z
+    .string()
+    .optional()
+    .transform((v) => (v ? new Date(v) : undefined))
+    .refine((v) => v === undefined || !Number.isNaN(v.getTime()), {
+      message: 'Fecha inválida',
+    }),
+  dateTo: z
+    .string()
+    .optional()
+    .transform((v) => (v ? new Date(v) : undefined))
+    .refine((v) => v === undefined || !Number.isNaN(v.getTime()), {
+      message: 'Fecha inválida',
+    }),
+});
+
+export type DriverMovementsListQuery = z.infer<
+  typeof driverMovementsListQuerySchema
+>;
 
 /**
  * GET /api/accounts

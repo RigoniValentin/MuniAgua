@@ -21,8 +21,8 @@ export const ALL_DIRECTIONS: Direction[] = Object.values(DIRECTIONS);
 
 /**
  * Movement types supported by the ledger.
- * Only MANUAL_ADJUSTMENT and REVERSAL are exposed publicly in FASE 4.
- * The remaining values exist to keep the schema forward-compatible
+ * Only MANUAL_ADJUSTMENT, DRIVER_ADJUSTMENT and REVERSAL are exposed
+ * publicly. The remaining values exist to keep the schema forward-compatible
  * with future Orders / Payments / Deliveries integrations.
  *
  * NOTE: cash collections live in their own `CashMovement` collection
@@ -30,6 +30,8 @@ export const ALL_DIRECTIONS: Direction[] = Object.values(DIRECTIONS);
  */
 export const MOVEMENT_TYPES = {
   MANUAL_ADJUSTMENT: 'MANUAL_ADJUSTMENT',
+  /** Ajuste manual hecho por un repartidor (cobro en el domicilio). */
+  DRIVER_ADJUSTMENT: 'DRIVER_ADJUSTMENT',
   ORDER_CHARGE: 'ORDER_CHARGE',
   PAYMENT: 'PAYMENT',
   REVERSAL: 'REVERSAL',
@@ -46,6 +48,8 @@ export const ALL_MOVEMENT_TYPES: MovementType[] = Object.values(MOVEMENT_TYPES);
  */
 export const SOURCE_TYPES = {
   MANUAL: 'MANUAL',
+  /** Origen: un repartidor operando en el domicilio del cliente. */
+  DRIVER: 'DRIVER',
   ORDER: 'ORDER',
   PAYMENT: 'PAYMENT',
   SYSTEM: 'SYSTEM',
@@ -54,6 +58,15 @@ export const SOURCE_TYPES = {
 
 export type SourceType = (typeof SOURCE_TYPES)[keyof typeof SOURCE_TYPES];
 export const ALL_SOURCE_TYPES: SourceType[] = Object.values(SOURCE_TYPES);
+
+export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
+  MANUAL: 'Ajuste manual',
+  DRIVER: 'Repartidor',
+  ORDER: 'Pedido',
+  PAYMENT: 'Pago',
+  SYSTEM: 'Sistema',
+  REVERSAL: 'Reversión',
+};
 
 /**
  * Account status derived from balanceMinor.
@@ -95,6 +108,7 @@ export const DIRECTION_LABEL: Record<Direction, string> = {
 
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   MANUAL_ADJUSTMENT: 'Ajuste manual',
+  DRIVER_ADJUSTMENT: 'Ajuste de repartidor',
   ORDER_CHARGE: 'Cargo por pedido',
   PAYMENT: 'Pago',
   REVERSAL: 'Reversión',

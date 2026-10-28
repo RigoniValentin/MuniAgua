@@ -60,6 +60,13 @@ export const DEFAULT_PRODUCT_SORT_FIELD: ProductSortableField = 'name';
 export const DEFAULT_PRODUCT_SORT_ORDER: 'asc' | 'desc' = 'asc';
 
 /**
- * Maximum defensive base price in minor units (10 million ARS).
+ * Maximum defensive price in minor units (10 million ARS).
+ * Applies to the base price and to every fixed price per client type.
  */
-export const MAX_BASE_PRICE_MINOR = 10_000_000 * 100;
+export const MAX_PRICE_MINOR = 10_000_000 * 100;
+
+/**
+ * @deprecated Use {@link MAX_PRICE_MINOR} (base price and fixed prices share
+ * the same ceiling).
+ */
+export const MAX_BASE_PRICE_MINOR = MAX_PRICE_MINOR;

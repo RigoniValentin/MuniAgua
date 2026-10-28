@@ -38,6 +38,13 @@ export const PERMISSIONS = {
   ACCOUNTS_ADJUST: 'accounts.adjust',
   ACCOUNTS_REVERSE: 'accounts.reverse',
   ACCOUNTS_SELF: 'accounts.self',
+  /**
+   * Repartidor-only: register a manual DEBIT/CREDIT on a client account
+   * (cobro en el domicilio). Deliberately NOT the same permission as
+   * `accounts.adjust`: the driver must never reach the admin adjustment
+   * flow, and the audit trail must be able to tell both apart.
+   */
+  ACCOUNTS_DRIVER_ADJUST: 'accounts.driver.adjust',
   CLIENTS_SELF: 'clients.self',
   CLIENTS_LINK_USER: 'clients.linkUser',
   PAYMENTS_READ: 'payments.read',
@@ -92,7 +99,6 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     PERMISSIONS.PRODUCTS_CREATE,
     PERMISSIONS.PRODUCTS_UPDATE,
     PERMISSIONS.PRICING_READ,
-    PERMISSIONS.PRICING_MANAGE,
     PERMISSIONS.PRICING_QUOTE,
     PERMISSIONS.ORDERS_READ,
     PERMISSIONS.ORDERS_CREATE,
@@ -116,6 +122,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     PERMISSIONS.DELIVERY_CLIENTS_CREATE,
     PERMISSIONS.DELIVERY_CLIENTS_UPDATE,
     PERMISSIONS.ACCOUNTS_READ,
+    PERMISSIONS.ACCOUNTS_DRIVER_ADJUST,
     PERMISSIONS.CASH_READ,
   ],
   CIUDADANO: [

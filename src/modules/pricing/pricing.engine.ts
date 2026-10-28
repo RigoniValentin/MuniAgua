@@ -3,7 +3,7 @@ import { Client, type ClientDocument } from '../clients/clients.model.js';
 import { Product, type ProductDocument } from '../products/products.model.js';
 import type { PricingRuleDocument } from './pricing.rules.model.js';
 import { findApplicableRules } from './pricing.rules.service.js';
-import { computeAdjustment } from '../../shared/money.js';
+import { pickBestRule, resolveUnitPrice } from './pricing.resolve.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../shared/errors.js';
 import type {
   AppliedRuleSnapshot,
@@ -15,33 +15,11 @@ import type {
   ProductType,
 } from './pricing.types.js';
 
-const SPECIFICITY_RANK: Record<PricingScope, number> = {
-  PRODUCT: 3,
-  PRODUCT_TYPE: 2,
-  ALL_PRODUCTS: 1,
-};
+export { pickBestRule };
 
 export interface QuoteRequestItem {
   productId: string;
   quantity: number;
-}
-
-/**
- * Select the most specific active rule for a product.
- *
- * Tie-breaker: higher specificity > higher priority > earlier createdAt.
- */
-export function pickBestRule(
-  rules: PricingRuleDocument[],
-): PricingRuleDocument | null {
-  if (rules.length === 0) return null;
-  const sorted = [...rules].sort((a, b) => {
-    const diff = SPECIFICITY_RANK[b.scope] - SPECIFICITY_RANK[a.scope];
-    if (diff !== 0) return diff;
-    if (a.priority !== b.priority) return b.priority - a.priority;
-    return a.createdAt.getTime() - b.createdAt.getTime();
-  });
-  return sorted[0] ?? null;
 }
 
 function toAppliedRuleSnapshot(
@@ -67,34 +45,31 @@ function toAppliedRuleSnapshot(
 export function computeLineItem(args: {
   product: ProductDocument;
   quantity: number;
+  clientType: ClientType;
   rules: PricingRuleDocument[];
 }): QuoteLineItem {
-  const { product, quantity, rules } = args;
-  const rule = pickBestRule(rules);
+  const { product, quantity, clientType, rules } = args;
 
   const unitBasePriceMinor = product.basePriceMinor;
-  const adjustmentPercentage = rule ? rule.adjustmentValue : 0;
-
-  let unitFinalPriceMinor = unitBasePriceMinor;
-
-  if (rule) {
-    const computed = computeAdjustment(unitBasePriceMinor, rule.adjustmentValue);
-    unitFinalPriceMinor = computed.finalMinor;
-  }
+  const resolved = resolveUnitPrice({ product, clientType, rules });
 
   const subtotalBaseMinor = unitBasePriceMinor * quantity;
-  const subtotalFinalMinor = unitFinalPriceMinor * quantity;
+  const subtotalFinalMinor = resolved.priceMinor * quantity;
 
   return {
     productId: product._id.toString(),
     productCode: product.code,
     productName: product.name,
     productType: product.productType,
+    clientType,
     quantity,
     unitBasePriceMinor,
-    appliedRule: rule ? toAppliedRuleSnapshot(rule) : null,
-    adjustmentPercentage,
-    unitFinalPriceMinor,
+    appliedRule: resolved.appliedRule
+      ? toAppliedRuleSnapshot(resolved.appliedRule)
+      : null,
+    adjustmentPercentage: resolved.impliedPercentage,
+    priceSource: resolved.source,
+    unitFinalPriceMinor: resolved.priceMinor,
     subtotalBaseMinor,
     subtotalFinalMinor,
   };
@@ -163,7 +138,14 @@ export async function buildQuote(
       product.productType,
       product._id,
     );
-    lineItems.push(computeLineItem({ product, quantity: item.quantity, rules }));
+    lineItems.push(
+      computeLineItem({
+        product,
+        quantity: item.quantity,
+        clientType: client.clientType,
+        rules,
+      }),
+    );
   }
 
   const totals = computeTotals(lineItems);

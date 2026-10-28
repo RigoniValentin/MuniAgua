@@ -140,6 +140,84 @@ describe('POST /api/products', () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
+
+  it('creates a product with fixed prices per client type', async () => {
+    await seedUser('ADMIN', 'admin@buchardo.gob.ar');
+    const token = await loginAs('admin@buchardo.gob.ar');
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send(
+        validProductBody({
+          clientTypePrices: [
+            { clientType: 'JUBILADO', priceMinor: 650_000 },
+            { clientType: 'NO_LOCAL', priceMinor: 1_400_000 },
+          ],
+        }),
+      );
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.product.clientTypePrices).toEqual([
+      {
+        clientType: 'JUBILADO',
+        priceMinor: 650_000,
+        basePriceMinorAtSet: 1_000_000,
+      },
+      {
+        clientType: 'NO_LOCAL',
+        priceMinor: 1_400_000,
+        basePriceMinorAtSet: 1_000_000,
+      },
+    ]);
+  });
+
+  it('rejects a fixed price for LOCAL (the base price IS the local price)', async () => {
+    await seedUser('ADMIN', 'admin@buchardo.gob.ar');
+    const token = await loginAs('admin@buchardo.gob.ar');
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send(
+        validProductBody({
+          clientTypePrices: [{ clientType: 'LOCAL', priceMinor: 900_000 }],
+        }),
+      );
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects duplicate fixed prices for the same client type', async () => {
+    await seedUser('ADMIN', 'admin@buchardo.gob.ar');
+    const token = await loginAs('admin@buchardo.gob.ar');
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send(
+        validProductBody({
+          clientTypePrices: [
+            { clientType: 'JUBILADO', priceMinor: 650_000 },
+            { clientType: 'JUBILADO', priceMinor: 600_000 },
+          ],
+        }),
+      );
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects a negative fixed price', async () => {
+    await seedUser('ADMIN', 'admin@buchardo.gob.ar');
+    const token = await loginAs('admin@buchardo.gob.ar');
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${token}`)
+      .send(
+        validProductBody({
+          clientTypePrices: [{ clientType: 'JUBILADO', priceMinor: -1 }],
+        }),
+      );
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+  });
 });
 
 describe('GET /api/products', () => {

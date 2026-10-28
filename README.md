@@ -220,6 +220,8 @@ src/
 | GET    | `/api/pricing/rules/:id`| Sí (pricing.read) | Obtiene regla por ID       |
 | POST   | `/api/pricing/rules`    | Sí (pricing.manage) | Crea regla                |
 | PATCH  | `/api/pricing/rules/:id`| Sí (pricing.manage) | Actualiza regla          |
+| GET    | `/api/pricing/price-matrix` | Sí (pricing.read) | Matriz de precios (productos × tipos de cliente) |
+| PATCH  | `/api/pricing/price-matrix` | Sí (pricing.manage) | Guarda precios exactos por celda |
 | POST   | `/api/pricing/quote`    | Sí (pricing.quote) | Cotiza un pedido (NO crea pedido) |
 | GET    | `/api/accounts`         | Sí (accounts.read) | Lista cuentas corrientes paginadas con resumen |
 | GET    | `/api/accounts/:clientId/summary`   | Sí (accounts.read) | Resumen (totales + saldo + estado) |
@@ -228,6 +230,8 @@ src/
 | POST   | `/api/accounts/movements/:movementId/reverse` | Sí (accounts.reverse) | Revierte un movimiento |
 | GET    | `/api/accounts/me/summary`    | Sí (accounts.self) | Resumen del cliente vinculado al ciudadano |
 | GET    | `/api/accounts/me/movements`  | Sí (accounts.self) | Historial del cliente vinculado al ciudadano |
+| POST   | `/api/accounts/driver/:clientId/adjustments` | Sí (accounts.driver.adjust) | Ajuste de repartidor (cobro en el domicilio) |
+| GET    | `/api/accounts/driver/me/movements` | Sí (accounts.read) | Ajustes registrados por el repartidor autenticado |
 | GET    | `/api/clients/me`             | Sí (clients.self)  | Devuelve el Client vinculado al User autenticado (DTO seguro) |
 | PATCH  | `/api/clients/me`             | Sí (clients.self)  | Edita SOLO phone/email/address del propio Client (mass-assignment guard) |
 | GET    | `/api/clients/:clientId/citizen-access`  | Sí (clients.linkUser) | Inspecciona el User vinculado al Client |
@@ -340,10 +344,35 @@ FASE 3 introduce el catálogo de productos, el motor de precios y la gestión de
 | `description`    | string?                           | Descripción opcional                              |
 | `productType`    | enum                              | `WATER_REFILL`, `CONTAINER`, `DISPENSER`, `OTHER` |
 | `basePriceMinor` | integer (centavos)                | Precio base en unidades menores enteras           |
+| `clientTypePrices` | array `{clientType, priceMinor, basePriceMinorAtSet}` | Precio EXACTO por tipo de cliente (ver abajo) |
 | `tracksStock`    | boolean                           | Define si el producto controla stock (FASE 9)     |
 | `active`         | boolean                           | Soft-delete                                       |
 | `createdAt/updatedAt` | Date                        | Timestamps automáticos                            |
 | `createdBy/updatedBy` | ObjectId? (User)              | Auditoría básica                                  |
+
+### Precio exacto por tipo de cliente
+
+El porcentaje no siempre puede expresar el precio que la Municipalidad quiere
+cobrar (y al aplicarse genera centavos). Por eso cada producto puede tener
+**precios exactos** por tipo de cliente:
+
+| Campo                  | Tipo    | Descripción                                                          |
+| ---------------------- | ------- | -------------------------------------------------------------------- |
+| `clientType`           | enum    | Tipo de cliente. **`LOCAL` está prohibido**: el precio base *es* el precio local |
+| `priceMinor`           | integer | Precio final unitario exacto, en centavos                          |
+| `basePriceMinorAtSet`  | integer | Precio base del producto en el momento en que se cargó el precio    |
+
+Reglas:
+
+- El precio exacto **tiene prioridad** sobre las reglas de porcentaje.
+- `basePriceMinorAtSet` lo sella el servidor (el cliente nunca lo manda).
+- Si después cambia el precio base, el precio exacto **no se mueve**: la
+  matriz de precios lo marca como *desactualizado* para que el administrador
+  lo revise (y pueda confirmarlo con "✓ Revisado").
+- `LOCAL` no admite precio exacto: el precio base es el precio local.
+
+Ver `src/modules/pricing/pricing.resolve.ts` (resolución) y
+`src/modules/pricing/pricing.matrix.service.ts` (matriz).
 
 ### Modelo PricingRule
 
@@ -367,15 +396,41 @@ Función pura: `buildQuote(clientId, items)` → `QuoteResult`. Algoritmo:
 
 1. Carga el cliente y los productos.
 2. Para cada ítem, busca reglas activas aplicables (`scope = ALL_PRODUCTS / PRODUCT_TYPE / PRODUCT` con coincidencia por `clientType`).
-3. Selecciona la regla aplicable según:
-   - 1° especificidad: `PRODUCT` > `PRODUCT_TYPE` > `ALL_PRODUCTS`.
-   - 2° mayor `priority`.
-   - 3° desempate estable por `createdAt`.
+3. Resuelve el precio unitario con la precedencia (ver `pricing.resolve.ts`):
+   1. **Precio exacto** cargado para (producto, tipo de cliente).
+   2. Regla aplicable, según:
+      - 1° especificidad: `PRODUCT` > `PRODUCT_TYPE` > `ALL_PRODUCTS`.
+      - 2° mayor `priority`.
+      - 3° desempate estable por `createdAt`.
+   3. Precio base.
 4. Calcula `unitFinalPriceMinor` aplicando el porcentaje con redondeo half-up.
 5. Acumula totales: `baseMinor`, `adjustmentMinor`, `finalMinor`.
 6. Nunca devuelve precios negativos (clamp a 0).
 
-Ver `src/modules/pricing/pricing.engine.ts` y `src/modules/pricing/pricing.types.ts`.
+`adjustmentPercentage` es siempre el **margen real** del precio final respecto
+del precio base: el % de la regla cuando el precio viene de una regla, o el
+margen equivalente (`(precio - base) / base`) cuando viene de un precio
+exacto. `priceSource` indica el origen (`BASE` / `PERCENTAGE` / `FIXED`).
+
+Ver `src/modules/pricing/pricing.engine.ts`, `src/modules/pricing/pricing.resolve.ts` y `src/modules/pricing/pricing.types.ts`.
+
+### Matriz de precios
+
+| Método  | Ruta                       | Permiso              | Descripción                                        |
+| ------- | -------------------------- | -------------------- | -------------------------------------------------- |
+| `GET`   | `/api/pricing/price-matrix`| `pricing.read`       | Grilla productos × tipos de cliente con el precio vigente, su origen y el margen equivalente |
+| `PATCH` | `/api/pricing/price-matrix`| `pricing.manage`     | Guarda cambios de la grilla (semántica por celda)  |
+
+El `PATCH` recibe `{ items: [{ productId, clientType, priceMinor }] }` donde
+`priceMinor: null` borra el precio exacto:
+
+- `clientType = LOCAL` → actualiza el precio base del producto.
+- Otro tipo de cliente con precio → carga/sella el precio exacto.
+- Otro tipo de cliente con `null` → borra el precio exacto y vuelve al %.
+
+Los precios exactos que **no** vienen en el payload no se tocan: por eso un
+cambio de precio base los deja marcados como desactualizados en vez de
+moverse por debajo de la mesa.
 
 ### Dinero — minor units
 
@@ -601,7 +656,7 @@ Los controllers y otros services nunca recalculan manualmente.
 | `accounts.reverse`  | ✓           | ✓     | —        | —          | —         |
 | `accounts.self`     | ✓           | —     | —        | —          | ✓         |
 
-> `OPERADOR` puede cargar ajustes pero **no** revertir. `REPARTIDOR` es solo lectura. `CIUDADANO` accede únicamente a su propia cuenta. **Nunca** se reutiliza `accounts.read` para exponer cuentas a `CIUDADANO`.
+> `OPERADOR` puede cargar ajustes pero **no** revertir. `REPARTIDOR` es solo lectura en esta tabla: el ajuste propio del repartidor usa un permiso aparte (`accounts.driver.adjust`, ver FASE 9). `CIUDADANO` accede únicamente a su propia cuenta. **Nunca** se reutiliza `accounts.read` para exponer cuentas a `CIUDADANO`.
 
 ### Clientes inactivos
 
@@ -1002,6 +1057,115 @@ mientras está en la puerta.
 > **Re-login necesario.** Los permisos viajan embebidos en el access token. Un
 > repartidor con una sesión abierta antes de este cambio no obtiene los
 > permisos nuevos hasta que vuelve a iniciar sesión.
+
+## FASE 9 — Ajustes de cuenta corriente hechos por el repartidor
+
+El repartidor puede **imputar un cargo o un crédito en la cuenta corriente de un
+cliente** (cobro en el domicilio): por ejemplo, cuando cobra en el mostrador
+del barrio y deja asentado ese movimiento en el libro del cliente.
+
+Es una extensión del módulo `accounts` (FASE 4). **No** crea un segundo libro,
+**no** toca el ledger de efectivo (`cash`) y **no** reemplaza el flujo de
+entrega con `paymentMethod: ACCOUNT`, que sigue generando su `ORDER_CHARGE`
+automático.
+
+### Endpoints
+
+| Método | Endpoint | Permiso | Descripción |
+| ------ | -------- | ------- | ----------- |
+| POST | `/api/accounts/driver/:clientId/adjustments` | `accounts.driver.adjust` | Registra un movimiento `DRIVER_ADJUSTMENT`. Body: `{ direction, amountMinor, description, idempotencyKey? }`. |
+| GET  | `/api/accounts/driver/me/movements` | `accounts.read` | Historial paginado de los ajustes del repartidor autenticado. |
+
+> Las rutas `/driver/*` se registran **antes** que `/:clientId/*` para que
+> Express nunca interprete `"driver"` como un ObjectId.
+
+### Permisos
+
+| Permiso | SUPER_ADMIN | ADMIN | OPERADOR | REPARTIDOR | CIUDADANO |
+| ------- | :---------: | :---: | :------: | :--------: | :-------: |
+| `accounts.driver.adjust` | ✓ | — | — | ✓ | — |
+
+> `accounts.driver.adjust` es **distinto** de `accounts.adjust` a propósito:
+> el repartidor nunca alcanza el flujo de ajuste administrativo, y el libro
+> puede distinguir ambos orígenes (`DRIVER_ADJUSTMENT` vs `MANUAL_ADJUSTMENT`).
+> La reversión sigue siendo **exclusiva de la administración**
+> (`accounts.reverse`): el repartidor no revierte ni siquiera lo que él mismo
+> registró.
+
+### Qué se puede mandar y qué no
+
+El repartidor sólo puede elegir **dirección**, **importe** y **motivo**. El
+`movementType`, el `sourceType`, el autor y su rol los deriva el servidor:
+
+| Dato | Origen | Por qué |
+| ---- | ------ | ------- |
+| `direction`, `amountMinor`, `description` | Body del repartidor | Lo que la operación define. |
+| `movementType` | Servidor → `DRIVER_ADJUSTMENT` | Distingue el origen en el libro. |
+| `sourceType` | Servidor → `DRIVER` | Eje "quién originó el movimiento". |
+| `createdBy` | Sesión (JWT) | Nunca es falsificable. |
+| `createdByRole` | Sesión (JWT), **congelado** | Snapshot durable del rol. |
+
+El schema Zod es **`.strict()`**: cualquier intento de mandar `createdBy`,
+`movementType` o `sourceType` desde el cliente devuelve `400` y no escribe
+nada en el libro.
+
+### Auditoría
+
+El rastro vive en el propio ledger (append-only, inmutable), sin una colección
+de auditoría paralela:
+
+- `createdBy` — `_id` del repartidor que registró el movimiento.
+- `createdByRole` — **snapshot del rol al momento de la operación**. Es lo que
+  hace el rastro durable: si el usuario cambia de rol más adelante, el
+  movimiento histórico sigue atribuyéndose al rol con el que se hizo.
+- `createdByName` — se resuelve en la lectura (no se denormaliza), en un
+  prefetch batch para no hacer N+1.
+- `occurredAt`, `description` (motivo **obligatorio**), `idempotencyKey`.
+
+El admin ve el autor de cada movimiento en el historial de la cuenta, con un
+badge **"Ajuste de repartidor"**, y puede filtrar el historial por origen con
+`GET /api/accounts/:clientId/movements?movementType=DRIVER_ADJUSTMENT`.
+
+### Idempotencia
+
+El cliente móvil puede mandar una `idempotencyKey` (el frontend manda un UUID
+por envío). Reintentar el **mismo** envío con la misma clave devuelve el
+movimiento ya registrado en lugar de duplicarlo; reutilizar la clave con otro
+cuerpo devuelve `409 CONFLICT`.
+
+### Límites
+
+Por decisión de la Municipalidad, **no hay límites monetarios**: el repartidor
+puede imputar cualquier importe. Lo que sí existe:
+
+- **Rate limit**: 30 movimientos / 15 min por repartidor
+  (`driverAdjustmentLimiter`), para que un cliente móvil con un bug no inunde
+  el libro. No es un límite de monto.
+- **Motivo obligatorio** en cada movimiento.
+- **Reversión administrativa** disponible para corregir cualquier error.
+
+> Si en el futuro se requieren topes (importe máximo por movimiento, tope de
+> saldo a favor o límite diario), el lugar único para agregarlos es
+> `createDriverAdjustment()` en `accounts.service.ts`.
+
+### Clientes inactivos
+
+Igual que el resto del módulo `accounts`, **no** se bloquea el registro sobre
+clientes inactivos: la cuenta corriente y la habilitación para vender son
+dominios independientes.
+
+### Tests
+
+```bash
+npx vitest run tests/accounts-driver.test.ts
+```
+
+Cubre: escritura en el ledger, cálculo del saldo, estampa de auditoría,
+durabilidad del rol congelado, separación de permisos (el repartidor no entra
+al flujo admin ni revierte), reversión administrativa e inmutabilidad,
+idempotencia, validaciones de entrada y listado propio acotado al repartidor
+autenticado.
+
 
 ### Operadores reales (producción)
 

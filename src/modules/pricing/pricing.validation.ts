@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { ALL_CLIENT_TYPES, type ClientType } from '../clients/clients.types.js';
-import { ALL_PRODUCT_TYPES, type ProductType } from '../products/products.types.js';
+import {
+  ALL_PRODUCT_TYPES,
+  MAX_PRICE_MINOR,
+  type ProductType,
+} from '../products/products.types.js';
 import {
   ALL_PRICING_ADJUSTMENT_TYPES,
   ALL_PRICING_SCOPES,
@@ -9,6 +13,9 @@ import {
   MAX_RULE_NAME_LENGTH,
   MIN_ADJUSTMENT_PERCENTAGE,
   MIN_QUOTE_QUANTITY,
+  PRICE_MATRIX_LIST_DEFAULT_LIMIT,
+  PRICE_MATRIX_LIST_MAX_LIMIT,
+  PRICE_MATRIX_MAX_UPDATES,
   SORTABLE_PRICING_RULE_FIELDS,
   type PricingAdjustmentType,
   type PricingRuleSortableField,
@@ -273,3 +280,88 @@ export const selfQuoteRequestSchema = z
   .strict();
 
 export type SelfQuoteRequestInput = z.infer<typeof selfQuoteRequestSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Matriz de precios (productos × tipos de cliente)                    */
+/* ------------------------------------------------------------------ */
+
+export const priceMatrixQuerySchema = z.object({
+  page: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? 1 : Number(v)))
+    .pipe(
+      z
+        .number()
+        .int('La página debe ser entera')
+        .min(1, 'La página debe ser mayor o igual a 1'),
+    ),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v === undefined ? PRICE_MATRIX_LIST_DEFAULT_LIMIT : Number(v),
+    )
+    .pipe(
+      z
+        .number()
+        .int('El límite debe ser entero')
+        .min(1, 'El límite debe ser mayor o igual a 1')
+        .max(PRICE_MATRIX_LIST_MAX_LIMIT, `El límite máximo es ${PRICE_MATRIX_LIST_MAX_LIMIT}`),
+    ),
+  search: z
+    .string()
+    .max(80, 'Búsqueda demasiado larga')
+    .optional()
+    .transform((v) => (v ? v.trim() : undefined)),
+  productType: productTypeEnum.optional(),
+  active: z
+    .union([z.literal('true'), z.literal('false'), z.boolean()])
+    .optional()
+    .transform((v) => {
+      if (v === undefined) return undefined;
+      if (typeof v === 'boolean') return v;
+      return v === 'true';
+    }),
+});
+
+export type PriceMatrixQuery = z.infer<typeof priceMatrixQuerySchema>;
+
+const priceMatrixItemSchema = z
+  .object({
+    productId: objectIdString,
+    clientType: clientTypeEnum,
+    priceMinor: z
+      .number({
+        invalid_type_error: 'El precio debe ser un número',
+        required_error: 'El precio es obligatorio',
+      })
+      .int('El precio debe ser un entero')
+      .min(0, 'El precio no puede ser negativo')
+      .max(MAX_PRICE_MINOR, `El precio máximo es $${MAX_PRICE_MINOR / 100}`)
+      .nullable(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.clientType === 'LOCAL' && data.priceMinor === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['priceMinor'],
+        message: 'El precio base no puede vaciarse',
+      });
+    }
+  });
+
+export const priceMatrixUpdateSchema = z
+  .object({
+    items: z
+      .array(priceMatrixItemSchema)
+      .min(1, 'Debe incluir al menos un cambio')
+      .max(
+        PRICE_MATRIX_MAX_UPDATES,
+        `Máximo ${PRICE_MATRIX_MAX_UPDATES} cambios por operación`,
+      ),
+  })
+  .strict();
+
+export type PriceMatrixUpdateInput = z.infer<typeof priceMatrixUpdateSchema>;

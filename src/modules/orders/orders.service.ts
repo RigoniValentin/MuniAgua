@@ -86,6 +86,7 @@ export interface OrderItemDto {
   quantity: number;
   unitBasePriceMinor: number;
   adjustmentPercentage: number;
+  priceSource: string;
   unitFinalPriceMinor: number;
   subtotalBaseMinor: number;
   subtotalFinalMinor: number;
@@ -206,6 +207,7 @@ function toItemDto(item: OrderItem): OrderItemDto {
     quantity: item.quantity,
     unitBasePriceMinor: item.unitBasePriceMinor,
     adjustmentPercentage: item.adjustmentPercentage,
+    priceSource: item.priceSource ?? 'PERCENTAGE',
     unitFinalPriceMinor: item.unitFinalPriceMinor,
     subtotalBaseMinor: item.subtotalBaseMinor,
     subtotalFinalMinor: item.subtotalFinalMinor,
@@ -393,6 +395,7 @@ async function buildOrderItems(
         quantity: line.quantity,
         unitBasePriceMinor: line.unitBasePriceMinor,
         adjustmentPercentage: line.adjustmentPercentage,
+        priceSource: line.priceSource,
         unitFinalPriceMinor: line.unitFinalPriceMinor,
         subtotalBaseMinor: line.subtotalBaseMinor,
         subtotalFinalMinor: line.subtotalFinalMinor,

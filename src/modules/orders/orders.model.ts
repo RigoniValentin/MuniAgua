@@ -9,6 +9,7 @@ import {
 } from './orders.types.js';
 import type { ClientType } from '../clients/clients.types.js';
 import type { ProductType } from '../products/products.types.js';
+import { ALL_PRICE_SOURCES } from '../pricing/pricing.types.js';
 
 export interface OrderAppliedRuleSnapshot {
   id: string;
@@ -30,6 +31,11 @@ export interface OrderItem {
   quantity: number;
   unitBasePriceMinor: number;
   adjustmentPercentage: number;
+  /**
+   * Origen del precio final: regla de porcentaje o precio exacto por tipo
+   * de cliente. Congelado con el pedido.
+   */
+  priceSource: string;
   unitFinalPriceMinor: number;
   subtotalBaseMinor: number;
   subtotalFinalMinor: number;
@@ -147,6 +153,12 @@ const orderItemSchema = new Schema<OrderItem>(
     },
     unitBasePriceMinor: { type: Number, required: true, min: 0 },
     adjustmentPercentage: { type: Number, required: true, default: 0 },
+    priceSource: {
+      type: String,
+      required: false,
+      enum: ALL_PRICE_SOURCES,
+      default: 'PERCENTAGE',
+    },
     unitFinalPriceMinor: { type: Number, required: true, min: 0 },
     subtotalBaseMinor: { type: Number, required: true, min: 0 },
     subtotalFinalMinor: { type: Number, required: true, min: 0 },
